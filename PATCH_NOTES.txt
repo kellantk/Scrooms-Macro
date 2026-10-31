@@ -1,0 +1,61 @@
+SCROOM MACRO - PATCH NOTES
+==========================
+
+v1.9.2
+------
+- Fixed "Roblox isn't the active window" showing even when you're playing.
+  This happened if another window was also called "Roblox" (Bloxstrap, a
+  browser tab, the Microsoft Store version...). The macro now uses the
+  Roblox window you're actually in.
+- New "Make bug report" button (bottom left). If something goes wrong,
+  click it and send the file it makes. When the macro has a problem (circle
+  not clicked, frequency lost, scroom got away...) it now saves a picture of
+  the screen, so the bug report shows exactly what went wrong.
+
+v1.9.1
+------
+- Fixed: the app crashing on some PCs with an error about "numpy" when you
+  open it. It now starts up in a safer way.
+- If the app still can't start (for example your antivirus removed one of its
+  files), you now get a clear message telling you how to fix it, instead of a
+  confusing error. It also saves startup_error.txt that you can send for help.
+- Added simple install steps to the top of the README.
+
+v1.9
+----
+- Works in very bright places (like snowy areas). Before, the macro could stop
+  doing anything mid-catch and let the scroom go.
+- Works with every reel box size (it can change with your gear/upgrades).
+- Better at clicking the circle in bright places.
+
+v1.8
+----
+- Works with rarer scrooms that turn the reel purple (or other colors).
+  Before, the dot could slide to the left and lose the catch.
+- Fixed the dot swinging right then left right before a catch finished.
+- Works when bright grass is behind the reel.
+
+v1.7
+----
+- Removed a part of the code that some antivirus programs mistook for a
+  keylogger. Fewer false virus warnings.
+
+v1.6
+----
+- The app is now a folder (App) instead of one file - fewer antivirus warnings.
+- The start/stop key (F6) works in a safer way.
+
+v1.5
+----
+- Failsafe: if the circle part gets stuck for more than 5 seconds, the macro
+  puts your instrument away, takes it out again and casts again.
+
+v1.4
+----
+- Circle clicks are much more accurate, and the macro now learns your PC's
+  timing by itself after each cast.
+
+v1.3 and earlier
+----------------
+- First versions: automatic casting, circle, frequency and reel; works at any
+  window size; shows catches / got away; saves a log file.

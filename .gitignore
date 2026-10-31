@@ -1,0 +1,24 @@
+# built app + release zips (published as GitHub Releases, not in the code)
+App/
+releases/
+dist/
+build/
+*.spec
+version_info.txt
+
+# personal / runtime files
+settings.json
+macro_log.txt
+startup_error.txt
+debug/
+bug_report_*.zip
+inputs_*.csv
+*.keep
+_keep/
+
+# old unzipped copy
+ScroomMacro/
+
+# Python
+__pycache__/
+*.pyc
