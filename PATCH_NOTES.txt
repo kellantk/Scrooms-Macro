@@ -1,6 +1,17 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
+v1.9.3
+------
+- Updated for the Crescendo Valley update.
+- Added: Strings instruments (press A/S/D when the notes reach the circles).
+- Added: Keys instruments (press A/S/D/F when the tiles reach the bottom row).
+- Added: Percussion instruments (left click white notes, right click blue
+  notes, both for big notes).
+- Wind instruments are not supported yet.
+- The first time you use an instrument, click "Continue" on the game's
+  tutorial yourself - the macro waits for it.
+
 v1.9.2
 ------
 - Fixed "Roblox isn't the active window" showing even when you're playing.

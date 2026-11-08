@@ -34,6 +34,14 @@ the zip it creates.
 | `startup_check.py` | Checks the app's files on startup and shows a clear error if something's missing |
 | `make_version.py`, `build_exe.bat` | Build the `.exe` and release zip |
 
+**Supported instruments (Crescendo Valley update):** Strings, Keys, Percussion. Wind: not yet.
+
+| File | Minigame |
+|---|---|
+| `strings.py` | Strings: 3-lane note highway, keys A/S/D |
+| `keys.py` | Keys: Piano-Tiles board, keys A/S/D/F |
+| `percussion.py` | Percussion: one lane, left/right/both clicks |
+
 **Each minigame:**
 - **Ring:** finds the ring by its green zone, measures the needle's speed and direction, and
   clicks on the calculated position. After each click it reads where the needle froze and

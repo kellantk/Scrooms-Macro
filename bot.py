@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import detect
+import keys
+import percussion
+import strings
 
 
 @dataclass
@@ -114,6 +117,50 @@ def _save_png(path, rgb):
                 + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
+def _note_fit(tr, v_default):
+    """Notes speed up as they come closer (the highway is in perspective):
+    fit y = c + b*t + a*t^2 to the note's recent readings (t relative to the
+    last one). Falls back to a straight line / default speed."""
+    if len(tr.samples) < 2:
+        return None
+    t = np.array([s[0] for s in tr.samples])
+    y = np.array([s[1] for s in tr.samples])
+    t = t - t[-1]
+    if len(t) >= 4 and t[-1] - t[0] >= 0.15:
+        a, b, c0 = np.polyfit(t, y, 2)
+        if b > 0.1 * v_default and a > -0.5 * v_default:
+            return max(a, 0.0), b, c0
+    b, c0 = np.polyfit(t, y, 1) if t[-1] - t[0] > 0.05 else (v_default, y[-1])
+    return 0.0, (b if b > 0.1 * v_default else v_default), c0
+
+
+def note_pos(tr, now, v_default):
+    fit = _note_fit(tr, v_default)
+    dt = now - tr.samples[-1][0]
+    if fit is None:
+        return tr.x + v_default * dt
+    a, b, c0 = fit
+    return c0 + b * dt + a * dt * dt
+
+
+def time_to_reach(tr, now, y_target, v_default):
+    """Seconds until the note's center reaches y_target."""
+    if not tr.samples:
+        return float("inf")
+    fit = _note_fit(tr, v_default)
+    if fit is None:
+        return (y_target - tr.x) / v_default
+    a, b, c0 = fit
+    dt = now - tr.samples[-1][0]
+    # solve a*T^2 + b*T + c0 = y_target for T >= dt
+    if a > 1e-6:
+        disc = b * b + 4 * a * (y_target - c0)
+        T = (-b + np.sqrt(max(disc, 0.0))) / (2 * a)
+    else:
+        T = (y_target - c0) / b
+    return float(T - dt)
+
+
 def _circ_center(a, tol=math.radians(15)):
     """Robust center of a set of angles: the value with the most neighbours
     within `tol`, then the mean of those neighbours."""
@@ -192,6 +239,9 @@ class Bot:
         self.ring_finder = detect.RingFinder()
         self.freq_finder = detect.FreqFinder()
         self.reel_finder = detect.ReelFinder()
+        self.strings_finder = strings.StringsFinder()
+        self.perc_finder = percussion.PercussionFinder()
+        self.keys_finder = keys.KeysFinder()
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -301,6 +351,19 @@ class Bot:
     def freq(self):
         return self.look(self.freq_finder)
 
+    def strings(self):
+        return self.look(self.strings_finder)
+
+    def perc(self):
+        return self.look(self.perc_finder)
+
+    def keys(self):
+        return self.look(self.keys_finder)
+
+    def minigame_up(self):
+        """Is any catch minigame on screen already?"""
+        return bool(self.strings() or self.keys() or self.freq() or self.perc())
+
     def reel(self):
         r = self.look(self.reel_finder)
         if r and r[0] is not None:   # need the box to call it the reel phase
@@ -358,9 +421,18 @@ class Bot:
         if self.stopped():
             return
         # already mid-minigame (e.g. started the macro late)? jump straight in
+        if self.strings():
+            self.do_strings()
+            return
+        if self.keys():
+            self.do_keys()
+            return
         if self.freq():
             self.do_freq()
             self.after_freq()
+            return
+        if self.perc():
+            self.do_perc()
             return
         if self.reel():
             self.do_reel()
@@ -376,19 +448,29 @@ class Bot:
     def after_freq_wait(self):
         # frequency panel should slide in within a few seconds
         t0 = self.io.now()
-        self.set_phase("Waiting for frequency")
-        while not self.stopped() and self.io.now() - t0 < 7:
+        self.set_phase("Waiting for minigame")
+        # (strings: the "head start" rings come first, then the note highway)
+        while not self.stopped() and self.io.now() - t0 < 14:
             self.wait_focus()
+            if self.strings():
+                self.do_strings()
+                return
+            if self.keys():
+                self.do_keys()
+                return
             if self.freq():
                 self.do_freq()
                 self.after_freq()
+                return
+            if self.perc():
+                self.do_perc()
                 return
             if self.reel():
                 self.do_reel()
                 return
             self.io.sleep(0.02)
         self.snapshot("freq-not-found")
-        self.log("Frequency panel never showed up - recasting")
+        self.log("No minigame showed up - recasting")
 
     def after_freq(self):
         t0 = self.io.now()
@@ -437,7 +519,7 @@ class Bot:
                     self.snapshot("ring-not-found")
                     self.log("Ring didn't appear - recasting")
                     return False
-                if self.freq():
+                if self.minigame_up():
                     return True
                 self.io.sleep(0.01)
                 continue
@@ -546,6 +628,201 @@ class Bot:
             self.cfg.latency_ms = int(round(min(300, new)))
             msg += f" -> latency now {self.cfg.latency_ms} ms"
         self.log(msg)
+
+    # ----------------------------------------------------------- strings
+    def do_strings(self):
+        """Strings: 3-lane highway, keys A S D (notes speed up - perspective)."""
+        self.do_lanes("Strings", self.strings, strings.LANES, 0.38)
+
+    def do_keys(self):
+        """Keys: Piano-Tiles, 4 columns, keys A S D F (tiles fall at a steady speed)."""
+        self.do_lanes("Keys", self.keys, keys.LANES, 0.22)
+
+    def do_lanes(self, name, look, lanes, v_frac):
+        """Note lanes: press a lane's key as its note reaches the hit spot.
+        Notes are tracked per lane; the key goes down `latency` before the
+        note's predicted arrival, so it registers right on the spot."""
+        lat = self.cfg.latency_ms / 1000
+        self.set_phase(name, "notes coming")
+        self.log(f"{name} minigame")
+        track = {k: Tracker(window=0.6) for k in lanes}
+        done_y = {k: None for k in lanes}      # the note we already pressed for
+        done_t = {k: -9.0 for k in lanes}
+        release_at = {}                                  # key -> time to let go
+        gone_since = None
+        loop_dt = deque(maxlen=10)
+        prev_t = None
+        presses = 0
+        try:
+            while not self.stopped():
+                self.wait_focus()
+                now = self.io.now()
+                for k, t_up in list(release_at.items()):
+                    if now >= t_up:
+                        self.io.key_up(k)
+                        del release_at[k]
+                if prev_t is not None:
+                    loop_dt.append(now - prev_t)
+                prev_t = now
+                res = look()
+                if res is None:
+                    gone_since = gone_since or now
+                    # 2.5 s: rides out the first-time tutorial screen and hit flashes
+                    if now - gone_since > 2.5:
+                        break
+                    self.io.sleep(0.005)
+                    continue
+                gone_since = None
+                hw, notes = res
+                frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
+                v_default = v_frac * self.io.client_size()[1]      # px/s near the hit spot
+                for i, lane in enumerate(lanes):
+                    y = notes.get(lane)
+                    tr = track[lane]
+                    if y is None:
+                        # notes slip out of view just above the circle (its outline
+                        # hides them) - keep going on where it must be by now
+                        if tr.x is not None and len(tr.samples) >= 2 and now - tr.samples[-1][0] < 0.4:
+                            y = note_pos(tr, now, v_default)
+                            if y > hw.cy + hw.r:          # long past the circle: it's gone
+                                tr.reset()
+                                continue
+                            predicted = True
+                        else:
+                            tr.reset()
+                            continue
+                    else:
+                        predicted = False
+                    # a note higher up than the one we were following = a new note
+                    if tr.x is not None and y < tr.x - 2 * hw.r:
+                        tr.reset()
+                    # still the note we already pressed for? ignore it until it's gone
+                    if done_y[lane] is not None and y >= done_y[lane] - 1.5 * hw.r and now - done_t[lane] < 0.5:
+                        continue
+                    done_y[lane] = None
+                    if not predicted and (tr.x is None or abs(y - tr.x) > 0.5):   # skip repeated frames
+                        tr.add(now, y)
+                    if not tr.samples:          # nothing measured for this note yet
+                        continue
+                    if not predicted and now - tr.samples[-1][0] > 0.15:   # not moving: paused
+                        tr.reset()
+                        tr.add(now, y)
+                        continue
+                    t_hit = time_to_reach(tr, now, hw.cy, v_default)
+                    if t_hit - lat <= frame_dt * 0.5:
+                        if not self.cfg.dry_run:
+                            if lane in release_at:
+                                self.io.key_up(lane)
+                            self.io.key_down(lane)
+                            release_at[lane] = now + 0.05
+                        presses += 1
+                        done_y[lane], done_t[lane] = y, now
+                        tr.reset()
+                        self.set_phase(name, f"pressed {lane}  ({presses} notes)")
+        finally:
+            for k in release_at:
+                self.io.key_up(k)
+        self.log(f"{name} minigame finished ({presses} notes pressed)")
+        self.set_phase("Cooldown")
+        t0 = self.io.now()
+        while not self.stopped() and self.io.now() - t0 < self.cfg.cooldown_s:
+            self.io.sleep(0.05)
+
+    # -------------------------------------------------------- percussion
+    def do_perc(self):
+        """One lane, notes slide left to the scroom: white = left click, blue =
+        right click, big = both. Notes move at a steady speed and slip under
+        the scroom's diamond just before arriving, so the arrival is predicted."""
+        lat = self.cfg.latency_ms / 1000
+        self.set_phase("Percussion", "notes coming")
+        self.log("Percussion minigame")
+        tr = Tracker(window=0.4)
+        kind = None
+        done_x, done_t = None, -9.0
+        release_at = {}
+        gone_since = None
+        loop_dt = deque(maxlen=10)
+        prev_t = None
+        hits = 0
+        buttons = {"L": ("left",), "R": ("right",), "B": ("left", "right")}
+        try:
+            while not self.stopped():
+                self.wait_focus()
+                now = self.io.now()
+                for btn, t_up in list(release_at.items()):
+                    if now >= t_up:
+                        self.io.button_up(btn)
+                        del release_at[btn]
+                if prev_t is not None:
+                    loop_dt.append(now - prev_t)
+                prev_t = now
+                res = self.perc()
+                if res is None:
+                    gone_since = gone_since or now
+                    if now - gone_since > 2.5:        # also rides out the first-time tutorial
+                        break
+                    self.io.sleep(0.005)
+                    continue
+                gone_since = None
+                lane, notes = res
+                frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
+                v_default = -0.424 * self.io.client_size()[1]      # px/s (moving left)
+                # ignore the note we already hit until it disappears
+                if done_x is not None and now - done_t < 0.4:
+                    notes = [n for n in notes if n[0] > done_x + 0.03 * lane.L]
+                lead = min(notes) if notes else None
+                # the note we follow just slipped under the scroom's diamond, and the
+                # next one (further right) is now the first visible - keep following
+                # the hidden one until we've hit it
+                if (lead is not None and tr.x is not None and lead[0] > tr.x + 0.05 * lane.L
+                        and tr.x < lane.target_x + 0.15 * lane.L and now - tr.samples[-1][0] < 0.4):
+                    lead = None
+                if lead is not None:
+                    x, k = lead
+                    if tr.x is not None and x > tr.x + 0.05 * lane.L:   # a new note
+                        tr.reset()
+                        kind = None
+                    if tr.x is None or abs(x - tr.x) > 0.5:
+                        tr.add(now, x)
+                    elif now - tr.samples[-1][0] > 0.15:   # hasn't moved: paused
+                        tr.reset()
+                        tr.add(now, x)
+                        continue
+                    # a big note loses its white half first as it slides under the
+                    # scroom's diamond - once seen as big, it stays big
+                    kind = "B" if (k == "B" or kind == "B") else k
+                elif tr.x is None or now - tr.samples[-1][0] > 0.4:
+                    tr.reset()
+                    continue
+                # where is it now (it slips under the scroom's diamond near the end)?
+                if len(tr.samples) >= 3 and tr.samples[-1][0] - tr.samples[0][0] > 0.1:
+                    v = tr.v
+                    if v > 0.3 * v_default:      # (v_default is negative) not moving:
+                        continue                 # the game is paused (tutorial) - press nothing
+                else:
+                    v = v_default
+                x_now = tr.x + v * (now - tr.samples[-1][0])
+                t_hit = (x_now - lane.target_x) / -v
+                if t_hit - lat <= frame_dt * 0.5:
+                    if not self.cfg.dry_run:
+                        for btn in buttons.get(kind, ("left",)):
+                            if btn in release_at:
+                                self.io.button_up(btn)
+                            self.io.button_down(btn)
+                            release_at[btn] = now + 0.05
+                    hits += 1
+                    done_x, done_t = x_now, now
+                    tr.reset()
+                    kind = None
+                    self.set_phase("Percussion", f"{ {'L': 'left', 'R': 'right', 'B': 'both'}.get(kind)} click  ({hits} notes)")
+        finally:
+            for btn in release_at:
+                self.io.button_up(btn)
+        self.log(f"Percussion minigame finished ({hits} notes hit)")
+        self.set_phase("Cooldown")
+        t0 = self.io.now()
+        while not self.stopped() and self.io.now() - t0 < self.cfg.cooldown_s:
+            self.io.sleep(0.05)
 
     # -------------------------------------------------------------- freq
     def do_freq(self):
@@ -748,9 +1025,11 @@ class _INPUT(ctypes.Structure):
 
 
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
 KEYEVENTF_SCANCODE, KEYEVENTF_KEYUP = 0x0008, 0x0002
 SCANCODES = {"1": 0x02, "2": 0x03, "3": 0x04, "4": 0x05, "5": 0x06,
-             "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B}
+             "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B,
+             "a": 0x1E, "s": 0x1F, "d": 0x20, "f": 0x21}
 
 
 def _send(inp):
@@ -860,8 +1139,26 @@ class WindowsIO:
         _send(_INPUT(0, _INPUTUNION(mi=_MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, 0))))
 
 
+    def button_down(self, btn):
+        flag = MOUSEEVENTF_RIGHTDOWN if btn == "right" else MOUSEEVENTF_LEFTDOWN
+        _send(_INPUT(0, _INPUTUNION(mi=_MOUSEINPUT(0, 0, 0, flag, 0, 0))))
+
+    def button_up(self, btn):
+        flag = MOUSEEVENTF_RIGHTUP if btn == "right" else MOUSEEVENTF_LEFTUP
+        _send(_INPUT(0, _INPUTUNION(mi=_MOUSEINPUT(0, 0, 0, flag, 0, 0))))
+
     def mouse_up(self):
         _send(_INPUT(0, _INPUTUNION(mi=_MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, 0))))
+
+    def key_down(self, k):
+        sc = SCANCODES.get(str(k).lower())
+        if sc is not None:
+            _send(_INPUT(1, _INPUTUNION(ki=_KEYBDINPUT(0, sc, KEYEVENTF_SCANCODE, 0, 0))))
+
+    def key_up(self, k):
+        sc = SCANCODES.get(str(k).lower())
+        if sc is not None:
+            _send(_INPUT(1, _INPUTUNION(ki=_KEYBDINPUT(0, sc, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0, 0))))
 
     def key(self, k):
         sc = SCANCODES.get(str(k))

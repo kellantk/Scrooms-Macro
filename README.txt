@@ -21,6 +21,11 @@ HAVING A PROBLEM?
   (bottom left of the app) and send the .zip file it makes to the creator.
   It contains the log and screenshots of what went wrong.
 
+SUPPORTED INSTRUMENTS (Crescendo Valley update)
+  Strings, Keys, Percussion: yes.   Wind: not yet.
+  First time you use an instrument the game shows a tutorial - click its
+  "Continue" button yourself; the macro waits.
+
 HOW TO USE
 1. Open Roblox and stand where you normally fish, with nothing open
    (no backpack, no shop, no menus).

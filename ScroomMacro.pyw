@@ -15,7 +15,7 @@ import bot  # noqa: E402
 import hotkeys  # noqa: E402
 
 APP = "Scroom Macro"
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 SETTINGS = os.path.join(BASE, "settings.json")
 
