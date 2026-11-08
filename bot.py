@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import countin
 import detect
+import notify
 import keys
 import percussion
 import strings
@@ -34,6 +36,7 @@ class Config:
     latency_ms: int = 60          # input -> screen delay to compensate for
     auto_latency: bool = True     # learn latency_ms from where ring clicks actually land
     ring_timeout_s: float = 5.0   # ring up longer than this -> re-equip instrument and recast
+    count_in: bool = True         # click the head-start rings before the minigame
     aim_perfect: bool = True      # aim for the darker "Perfect" chunk of the ring
     cooldown_s: float = 2.5       # wait after a catch before casting again
     max_catches: int = 0          # 0 = run until stopped
@@ -45,6 +48,10 @@ class Config:
     reel_accel_left: float = 580
     reel_follow: float = 4.6      # scroom speed = follow * (dot - scroom)
     dry_run: bool = False         # detect only, never click
+    # Discord
+    webhook_url: str = ""
+    notify_catches: bool = True   # post each finished catch (with a screenshot of the result)
+    report_minutes: int = 15      # session report every N minutes (0 = off)
 
 
 @dataclass
@@ -58,6 +65,10 @@ class Status:
     log_path: str = ""            # also append log lines to this file
     debug_dir: str = ""           # save a screenshot here when something goes wrong
     log: deque = field(default_factory=lambda: deque(maxlen=200))
+    finished: int = 0             # minigames played to the end
+    per_minigame: dict = field(default_factory=dict)
+    session_start: float = 0.0
+    graph: dict = field(default_factory=dict)    # live data for the app's graph
 
 
 class Tracker:
@@ -232,6 +243,8 @@ class Bot:
         self.held = False
         self.last_click_t = 0.0
         self.landings = 0
+        self._last_report = time.time()
+        self.press_log = deque(maxlen=40)
         self._last_shot = {}
         self._hold_start = None
         self._last_repress = -9.0
@@ -242,6 +255,7 @@ class Bot:
         self.strings_finder = strings.StringsFinder()
         self.perc_finder = percussion.PercussionFinder()
         self.keys_finder = keys.KeysFinder()
+        self.countin_finder = countin.CountInFinder()
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -339,6 +353,48 @@ class Bot:
         self.io.sleep(0.04)
         self.io.mouse_up()
 
+    # ------------------------------------------------- results / discord
+    def stats(self):
+        return {"finished": self.st.finished, "casts": self.st.casts,
+                "uptime": time.time() - (self.st.session_start or time.time()),
+                "per_minigame": dict(self.st.per_minigame)}
+
+    def webhook_on(self):
+        return bool(self.cfg.webhook_url) and notify.valid_url(self.cfg.webhook_url) and not self.cfg.dry_run
+
+    def minigame_done(self, name, detail):
+        """Count it, post it to Discord (with a picture of the result), then
+        wait out the cooldown before casting again."""
+        self.st.finished += 1
+        self.st.per_minigame[name] = self.st.per_minigame.get(name, 0) + 1
+        self.st.graph = {}
+        self.set_phase("Cooldown")
+        t0 = self.io.now()
+        alerted = not (self.webhook_on() and self.cfg.notify_catches)
+        while not self.stopped() and self.io.now() - t0 < max(self.cfg.cooldown_s, 0 if alerted else 1.5):
+            if not alerted and self.io.now() - t0 >= 1.2:     # the "You caught ..." banner is up
+                alerted = True
+                try:
+                    w, h = self.io.client_size()
+                    shot = notify.png_bytes(np.ascontiguousarray(self.io.grab(0, 0, w, h)))
+                except Exception:
+                    shot = None
+                notify.send_async(self.cfg.webhook_url, notify.catch_embed(name, detail, self.stats()), shot,
+                                  lambda ok, msg: None if ok else self.log(f"Discord: couldn't post ({msg})"))
+            self.io.sleep(0.05)
+
+    def maybe_report(self, final=False):
+        if not self.webhook_on() or self.cfg.report_minutes <= 0:
+            return
+        now = time.time()
+        if final:
+            if self.st.finished:
+                notify.send_async(self.cfg.webhook_url, notify.report_embed(self.stats(), final=True))
+            return
+        if now - self._last_report >= 60 * self.cfg.report_minutes:
+            self._last_report = now
+            notify.send_async(self.cfg.webhook_url, notify.report_embed(self.stats()))
+
     def look(self, finder):
         w, h = self.io.client_size()
         x0, y0, x1, y1 = finder.region(w, h)
@@ -387,6 +443,8 @@ class Bot:
     # --------------------------------------------------------------- main
     def run(self):
         self.stop_event.clear()
+        self.st.session_start = time.time()
+        self._last_report = time.time()
         try:
             self.io.prepare(self.cfg)
             if self.cfg.equip_on_start and self.cfg.equip_key and not self.cfg.dry_run:
@@ -395,7 +453,7 @@ class Bot:
                 self.io.sleep(0.6)
             errors = 0
             while not self.stopped():
-                if self.cfg.max_catches and self.st.catches >= self.cfg.max_catches:
+                if self.cfg.max_catches and self.st.finished >= self.cfg.max_catches:
                     self.log(f"Reached {self.cfg.max_catches} catches")
                     break
                 try:
@@ -413,10 +471,13 @@ class Bot:
                     self.io.sleep(1.0)
         finally:
             self.hold(False)
+            self.st.graph = {}
+            self.maybe_report(final=True)
             self.set_phase("Stopped")
 
     def cycle(self):
-        """One cast -> ring -> frequency -> reel attempt."""
+        """One cast -> ring -> (count-in) -> minigame attempt."""
+        self.maybe_report()
         self.wait_focus()
         if self.stopped():
             return
@@ -449,9 +510,15 @@ class Bot:
         # frequency panel should slide in within a few seconds
         t0 = self.io.now()
         self.set_phase("Waiting for minigame")
-        # (strings: the "head start" rings come first, then the note highway)
+        counted_in = False
         while not self.stopped() and self.io.now() - t0 < 14:
             self.wait_focus()
+            # the count-in ("head start" rings) comes before every minigame
+            if not counted_in and self.cfg.count_in and self.look(self.countin_finder):
+                self.do_countin()
+                counted_in = True
+                t0 = self.io.now()
+                continue
             if self.strings():
                 self.do_strings()
                 return
@@ -547,6 +614,7 @@ class Bot:
             omega, phase = model
             target = _circ_center(np.array(targets))
             needle = detect._ang_diff(phase + omega * (now - t0), 0.0)
+            self.st.graph = {"mode": "ring", "needle": needle, "target": target, "omega": omega, "now": now}
             self.set_phase("Ring", f"needle {math.degrees(needle):4.0f} deg, target {math.degrees(target):4.0f}, "
                                    f"{math.degrees(omega):+.0f} deg/s")
             # time until the needle reaches the target, in its direction of travel
@@ -629,6 +697,67 @@ class Bot:
             msg += f" -> latency now {self.cfg.latency_ms} ms"
         self.log(msg)
 
+    # ---------------------------------------------------------- count-in
+    def do_countin(self):
+        """Rings shrink onto the circle around the scroom: click as each one
+        touches it (radius ~1.12x the circle, where the game gives Perfect).
+        The ring is hard to see in the last moment, so its arrival is predicted
+        from how fast it's shrinking."""
+        lat = self.cfg.latency_ms / 1000
+        self.set_phase("Count-in", "clicking the rings")
+        self.log("Count-in")
+        h = self.io.client_size()[1]
+        tr = Tracker(window=0.3)
+        done = False
+        clicks = 0
+        gone_since = None
+        loop_dt = deque(maxlen=10)
+        prev_t = None
+        t_start = self.io.now()
+        while not self.stopped() and self.io.now() - t_start < 12:
+            self.wait_focus()
+            now = self.io.now()
+            if prev_t is not None:
+                loop_dt.append(now - prev_t)
+            prev_t = now
+            res = self.look(self.countin_finder)
+            if res is None:
+                gone_since = gone_since or now
+                if now - gone_since > 0.6:
+                    break
+                continue
+            gone_since = None
+            target = 1.12 * res.r0
+            r = res.ring
+            if r is not None:
+                if tr.x is not None and r > tr.x + 0.2 * res.r0:      # a new ring came in
+                    tr.reset()
+                    done = False
+                if tr.x is None or abs(r - tr.x) > 0.5:
+                    tr.add(now, r)
+            if done or tr.x is None or clicks >= 4:      # there are 4 rings
+                continue
+            if now - tr.samples[-1][0] > 0.4:
+                tr.reset()
+                continue
+            # only click on a ring we've watched shrink for a bit: a ring that
+            # isn't moving means the game is paused (first-time tutorial)
+            if len(tr.samples) < 4 or tr.samples[-1][0] - tr.samples[0][0] < 0.1:
+                continue
+            v = tr.v
+            if v > -0.03 * h:
+                continue
+            r_now = tr.x + v * (now - tr.samples[-1][0])
+            t_hit = (r_now - target) / -v
+            self.st.graph = {"mode": "countin", "r0": res.r0, "ring": r_now, "target": target, "clicks": clicks, "now": now}
+            frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.03
+            if t_hit - lat <= frame_dt * 0.5:
+                self.click()
+                clicks += 1
+                done = True
+                self.set_phase("Count-in", f"{clicks} ring{'s' if clicks != 1 else ''}")
+        self.log(f"Count-in done ({clicks} clicks)")
+
     # ----------------------------------------------------------- strings
     def do_strings(self):
         """Strings: 3-lane highway, keys A S D (notes speed up - perspective)."""
@@ -676,6 +805,7 @@ class Bot:
                 hw, notes = res
                 frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
                 v_default = v_frac * self.io.client_size()[1]      # px/s near the hit spot
+                upcoming = {}
                 for i, lane in enumerate(lanes):
                     y = notes.get(lane)
                     tr = track[lane]
@@ -709,7 +839,9 @@ class Bot:
                         tr.add(now, y)
                         continue
                     t_hit = time_to_reach(tr, now, hw.cy, v_default)
+                    upcoming[lane] = [t_hit]
                     if t_hit - lat <= frame_dt * 0.5:
+                        self.press_log.append((now, lane))
                         if not self.cfg.dry_run:
                             if lane in release_at:
                                 self.io.key_up(lane)
@@ -719,14 +851,14 @@ class Bot:
                         done_y[lane], done_t[lane] = y, now
                         tr.reset()
                         self.set_phase(name, f"pressed {lane}  ({presses} notes)")
+                self.st.graph = {"mode": "lanes", "name": name, "lanes": list(lanes), "notes": upcoming,
+                                 "presses": list(self.press_log), "now": now}
         finally:
             for k in release_at:
                 self.io.key_up(k)
         self.log(f"{name} minigame finished ({presses} notes pressed)")
-        self.set_phase("Cooldown")
-        t0 = self.io.now()
-        while not self.stopped() and self.io.now() - t0 < self.cfg.cooldown_s:
-            self.io.sleep(0.05)
+        if presses:
+            self.minigame_done(name, f"{presses} notes hit")
 
     # -------------------------------------------------------- percussion
     def do_perc(self):
@@ -803,7 +935,18 @@ class Bot:
                     v = v_default
                 x_now = tr.x + v * (now - tr.samples[-1][0])
                 t_hit = (x_now - lane.target_x) / -v
+                gl = {"L": ["L"], "R": ["R"], "B": ["L", "R"]}
+                upcoming = {"L": [], "R": []}
+                for nx, nk in notes:
+                    for g in gl.get(nk, []):
+                        upcoming[g].append((nx - lane.target_x) / -v)
+                for g in gl.get(kind, []):
+                    upcoming[g].append(t_hit)
+                self.st.graph = {"mode": "lanes", "name": "Percussion", "lanes": ["L", "R"], "labels": ["Left", "Right"],
+                                 "notes": upcoming, "presses": list(self.press_log), "now": now}
                 if t_hit - lat <= frame_dt * 0.5:
+                    for g in gl.get(kind, ["L"]):
+                        self.press_log.append((now, g))
                     if not self.cfg.dry_run:
                         for btn in buttons.get(kind, ("left",)):
                             if btn in release_at:
@@ -819,10 +962,8 @@ class Bot:
             for btn in release_at:
                 self.io.button_up(btn)
         self.log(f"Percussion minigame finished ({hits} notes hit)")
-        self.set_phase("Cooldown")
-        t0 = self.io.now()
-        while not self.stopped() and self.io.now() - t0 < self.cfg.cooldown_s:
-            self.io.sleep(0.05)
+        if hits:
+            self.minigame_done("Percussion", f"{hits} notes hit")
 
     # -------------------------------------------------------------- freq
     def do_freq(self):
@@ -853,6 +994,9 @@ class Bot:
             if now - t_fps > 0.5:
                 self.st.fps = n / (now - t_fps)
                 n, t_fps = 0, now
+            ser = self.st.graph.get("series") if self.st.graph.get("mode") == "series" else None
+            ser = (ser or [])[-150:] + [(now, pin_x, dot_x, None)]
+            self.st.graph = {"mode": "series", "name": "Frequency", "series": ser, "labels": ("pin", "target"), "now": now}
             self.set_phase("Frequency", f"pin {pin_x:.0f}  dot {dot_x:.0f}  {'HOLD' if on else '----'}")
         self.hold(False)
 
@@ -951,6 +1095,9 @@ class Bot:
                 self.st.fps = n / (now - t_fps)
                 n, t_fps = 0, now
             inside = bl <= fish <= br
+            ser = self.st.graph.get("series") if self.st.graph.get("mode") == "series" else None
+            ser = (ser or [])[-150:] + [(now, fish, bc, half)]
+            self.st.graph = {"mode": "series", "name": "Reel", "series": ser, "labels": ("scroom", "box"), "now": now}
             self.set_phase("Reel", f"{progress:4.0%} caught   scroom {fish - bc:+4.0f} from center "
                                    f"{'IN ' if inside else 'OUT'}  {'HOLD' if on else '----'}")
         self.hold(False)
@@ -967,6 +1114,8 @@ class Bot:
                 self.st.escapes += 1
                 self.log(f"Got away at {progress:.0%}")
                 self.snapshot("got-away")
+            self.minigame_done("Reel", "Caught!" if progress >= 0.85 else f"Got away at {progress:.0%}")
+            return
         self.set_phase("Cooldown")
         t0 = self.io.now()
         while not self.stopped() and self.io.now() - t0 < cfg.cooldown_s:

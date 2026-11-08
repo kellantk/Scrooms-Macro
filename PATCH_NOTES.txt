@@ -1,6 +1,19 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
+v2.0
+----
+- Brand new look: dark, cleaner app with a status card, stats and settings tabs.
+- Live minigame view: watch the notes, the circle, the count-in and the reel
+  as the macro plays them.
+- Count-in support: the macro now clicks the head-start rings before every
+  minigame.
+- Discord alerts: paste a webhook in the Discord tab to get every catch posted
+  with a screenshot, plus a session report every few minutes.
+- Update alerts: the app tells you when a new version is out.
+- Stats now show catches, casts, catches per hour and how long it's been running.
+- Works on every keyboard layout (it presses the physical A/S/D/F keys).
+
 v1.9.3
 ------
 - Updated for the Crescendo Valley update.

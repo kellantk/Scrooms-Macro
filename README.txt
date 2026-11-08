@@ -26,6 +26,10 @@ SUPPORTED INSTRUMENTS (Crescendo Valley update)
   First time you use an instrument the game shows a tutorial - click its
   "Continue" button yourself; the macro waits.
 
+DISCORD ALERTS (optional)
+  In Discord: channel settings > Integrations > Webhooks > New Webhook > Copy URL.
+  Paste it in the app's Discord tab and click "Send test message".
+
 HOW TO USE
 1. Open Roblox and stand where you normally fish, with nothing open
    (no backpack, no shop, no menus).

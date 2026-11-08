@@ -41,6 +41,9 @@ the zip it creates.
 | `strings.py` | Strings: 3-lane note highway, keys A/S/D |
 | `keys.py` | Keys: Piano-Tiles board, keys A/S/D/F |
 | `percussion.py` | Percussion: one lane, left/right/both clicks |
+| `countin.py` | The count-in: clicks each head-start ring as it reaches the circle |
+| `notify.py` | Discord webhook: catch alerts with a screenshot, session reports |
+| `updater.py` | Checks this repo's Releases for a newer version (only opens the page - never installs anything) |
 
 **Each minigame:**
 - **Ring:** finds the ring by its green zone, measures the needle's speed and direction, and
@@ -57,6 +60,12 @@ different window sizes, rarer (purple) scrooms, dark areas and snow.
 What it touches on your PC: screenshots of the Roblox window only, mouse clicks, your
 instrument's hotbar key, and one registered hotkey. Settings, a log and debug screenshots are
 saved next to the exe.
+
+## Discord alerts
+
+Paste a channel webhook URL in the app's **Discord** tab. Every catch is posted with a screenshot
+of the result, plus a session report every N minutes. The URL is only ever sent to Discord, and
+it's removed from bug reports.
 
 ## Run / build from source
 
