@@ -1,6 +1,11 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
+v2.0.1
+------
+- Fixed: Strings hold notes (the long bars) are now held down until the bar ends.
+- Fixed: Strings notes are hit more on time.
+
 v2.0
 ----
 - Brand new look: dark, cleaner app with a status card, stats and settings tabs.

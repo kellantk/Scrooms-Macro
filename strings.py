@@ -101,31 +101,77 @@ def find_highway(img, ox, oy, h):
     return Highway((ax + ox, sx + ox, dx + ox), (ay + sy + dy) / 3 + oy, r)
 
 
-def next_notes(img, ox, oy, hw):
-    """For each lane: the y (window px) of the lowest note still above its
-    circle, or None. img is int16 RGB covering the highway's lower part."""
-    masks = lane_masks(img)
-    out = {}
+def next_notes(img, ox, oy, hw, masks=None):
+    """img is int16 RGB covering the highway's lower part. Returns
+    (notes, holds, bar_near), each keyed by lane:
+      notes:    y (window px) of the lowest note still above its circle, or None
+      holds:    True when that note is a hold note (a bar trails above it)
+      bar_near: how much of the strip just above the circle a hold bar covers
+                (0..1) - the key stays down until the bar has passed"""
+    if masks is None:
+        masks = lane_masks(img)
+    notes, holds, bar_near = {}, {}, {}
     r = hw.r
     y_lo = int(hw.cy - 9 * r - oy)            # how far up to look
     y_hi = int(hw.cy - 1.15 * r - oy)         # stop above the circle's own outline
+    thick = max(4, 0.35 * r)                  # a note's head is a solid pill
+    thin = max(2, 0.08 * r)                   # a hold bar is a thin line
     for i, lane in enumerate(LANES):
         x = hw.cx[i] - ox
+        mask = masks[lane]
+        s = mask[max(0, int(hw.cy - 2.2 * r - oy)):max(0, y_hi), max(0, int(x - 0.5 * r)):max(0, int(x + 0.5 * r))]
+        rows_near = s.sum(axis=1)
+        bar_near[lane] = float((rows_near >= thin).mean()) if rows_near.size else 0.0
         # the lane leans a little (perspective): allow some sideways room
-        xa, xb = int(x - 1.6 * r), int(x + 2.2 * r)
-        m = masks[lane][max(0, y_lo):max(0, y_hi), max(0, xa):max(0, xb)]
+        xa = max(0, int(x - 1.6 * r))
+        m = mask[max(0, y_lo):max(0, y_hi), xa:max(0, int(x + 2.2 * r))]
         rows = m.sum(axis=1)
-        filled = np.flatnonzero(rows >= max(4, 0.35 * r))   # a note is a solid pill
+        filled = np.flatnonzero(rows >= thick)
+        holds[lane] = False
         if filled.size == 0:
-            out[lane] = None
+            notes[lane] = None
             continue
         # lowest pill: last run of filled rows
         bottom = filled[-1]
         top = bottom
-        while top - 1 >= 0 and rows[top - 1] >= max(4, 0.35 * r):
+        while top - 1 >= 0 and rows[top - 1] >= thick:
             top -= 1
-        out[lane] = max(0, y_lo) + (top + bottom) / 2 + oy
-    return out
+        if bottom >= len(rows) - 2:
+            # the note is sliding under the circle's outline: only part of it
+            # shows, so its middle would seem to slow down. Report it hidden
+            # and let the bot predict where it is from the earlier readings
+            # (for a hold note the bar behind it would even stall the reading)
+            holds[lane] = bottom - top > 1.3 * r
+            notes[lane] = None
+            continue
+        if bottom - top > 1.3 * r:
+            # a hold bar gets wider near the circle and merges with its head:
+            # the head is the bottom part
+            center = bottom - 0.4 * r
+            holds[lane] = True
+        else:
+            center = (top + bottom) / 2
+            # a thin bar right above the head = a hold note
+            a0, a1 = top - int(1.5 * r), top - int(0.1 * r)
+            if a0 >= 0 and a1 > a0:
+                cols = np.flatnonzero(m[top:bottom + 1].any(axis=0))
+                hx = (cols.min() + cols.max()) / 2 if cols.size else x - xa
+                strip = m[a0:a1, max(0, int(hx - 0.5 * r)):max(0, int(hx + 0.5 * r))].sum(axis=1)
+                holds[lane] = bool(strip.size) and (strip >= thin).mean() >= 0.6
+        notes[lane] = max(0, y_lo) + center + oy
+    return notes, holds, bar_near
+
+
+def _rim(mask, cx, cy, r, n=48):
+    """Fraction of a circle's outline (+-2 px) that is lit in mask."""
+    H, W = mask.shape
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    hit = np.zeros(n, bool)
+    for dr in (-2, 0, 2):
+        xs = np.clip((cx + (r + dr) * np.cos(t)).astype(int), 0, W - 1)
+        ys = np.clip((cy + (r + dr) * np.sin(t)).astype(int), 0, H - 1)
+        hit |= mask[ys, xs]
+    return float(hit.mean())
 
 
 def _clamp(x0, y0, x1, y1, w, h):
@@ -141,6 +187,8 @@ class StringsFinder:
     def __init__(self):
         self.hw = None
         self.misses = 0
+        self.holds = {}         # lane -> the next note is a hold note
+        self.bar_near = {}      # lane -> hold bar coverage just above the circle
 
     def region(self, w, h):
         if self.hw:
@@ -150,18 +198,24 @@ class StringsFinder:
 
     def find(self, img, ox, oy, w, h):
         img = img.astype(np.int16)
+        masks = lane_masks(img)
         hw = find_highway(img, ox, oy, h)
         if hw is None:
             self.misses += 1
-            # the highway doesn't move; a note sliding into a circle hides its
-            # outline for a moment - keep the saved position through that
-            # (~1.5 s of reads) instead of losing the notes
-            if self.misses >= 90:
-                self.hw = None
+            # the highway doesn't move; a note sliding into a circle (or a long
+            # hold bar lying over it) hides its outline for a while - keep the
+            # saved position while the other circles are still there
+            if self.hw is not None:
+                old = self.hw
+                seen = sum(_rim(masks[k], old.cx[i] - ox, old.cy - oy, old.r) >= 0.5
+                           for i, k in enumerate(LANES))
+                if self.misses >= 90 and seen < 2:
+                    self.hw = None
             if self.hw is None:
                 return None
             hw = self.hw          # brief miss (e.g. a hit flash): keep the last position
         else:
             self.misses = 0
             self.hw = hw
-        return hw, next_notes(img, ox, oy, hw)
+        notes, self.holds, self.bar_near = next_notes(img, ox, oy, hw, masks)
+        return hw, notes

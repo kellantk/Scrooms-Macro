@@ -761,20 +761,24 @@ class Bot:
     # ----------------------------------------------------------- strings
     def do_strings(self):
         """Strings: 3-lane highway, keys A S D (notes speed up - perspective)."""
-        self.do_lanes("Strings", self.strings, strings.LANES, 0.38)
+        self.do_lanes("Strings", self.strings, strings.LANES, 0.38, self.strings_finder)
 
     def do_keys(self):
         """Keys: Piano-Tiles, 4 columns, keys A S D F (tiles fall at a steady speed)."""
         self.do_lanes("Keys", self.keys, keys.LANES, 0.22)
 
-    def do_lanes(self, name, look, lanes, v_frac):
+    def do_lanes(self, name, look, lanes, v_frac, finder=None):
         """Note lanes: press a lane's key as its note reaches the hit spot.
         Notes are tracked per lane; the key goes down `latency` before the
-        note's predicted arrival, so it registers right on the spot."""
+        note's predicted arrival, so it registers right on the spot.
+        Hold notes (strings: a bar trailing the note) keep the key down until
+        the bar has slid past the circle."""
         lat = self.cfg.latency_ms / 1000
         self.set_phase(name, "notes coming")
         self.log(f"{name} minigame")
         track = {k: Tracker(window=0.6) for k in lanes}
+        is_hold = {k: False for k in lanes}    # the note we follow is a hold note
+        holding = {}                           # lane -> [time down, reads without the bar]
         done_y = {k: None for k in lanes}      # the note we already pressed for
         done_t = {k: -9.0 for k in lanes}
         release_at = {}                                  # key -> time to let go
@@ -803,10 +807,23 @@ class Bot:
                     continue
                 gone_since = None
                 hw, notes = res
+                holds = getattr(finder, "holds", None) or {}
+                bar_near = getattr(finder, "bar_near", None) or {}
                 frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
                 v_default = v_frac * self.io.client_size()[1]      # px/s near the hit spot
+                # hold notes: let go once the bar has passed (2 reads in a row
+                # without it, so one bad frame doesn't drop the hold)
+                for lane, h in list(holding.items()):
+                    h[1] = h[1] + 1 if bar_near.get(lane, 0.0) < 0.3 else 0
+                    if (h[1] >= 2 and now - h[0] > 0.12) or now - h[0] > 8.0:
+                        if not self.cfg.dry_run:
+                            self.io.key_up(lane)
+                        del holding[lane]
+                        track[lane].reset()
                 upcoming = {}
                 for i, lane in enumerate(lanes):
+                    if lane in holding:
+                        continue
                     y = notes.get(lane)
                     tr = track[lane]
                     if y is None:
@@ -830,6 +847,10 @@ class Bot:
                     if done_y[lane] is not None and y >= done_y[lane] - 1.5 * hw.r and now - done_t[lane] < 0.5:
                         continue
                     done_y[lane] = None
+                    if not tr.samples:
+                        is_hold[lane] = False          # a new note
+                    if not predicted:
+                        is_hold[lane] = is_hold[lane] or bool(holds.get(lane))
                     if not predicted and (tr.x is None or abs(y - tr.x) > 0.5):   # skip repeated frames
                         tr.add(now, y)
                     if not tr.samples:          # nothing measured for this note yet
@@ -845,16 +866,20 @@ class Bot:
                         if not self.cfg.dry_run:
                             if lane in release_at:
                                 self.io.key_up(lane)
+                                del release_at[lane]
                             self.io.key_down(lane)
-                            release_at[lane] = now + 0.05
+                            if not is_hold[lane]:
+                                release_at[lane] = now + 0.05
+                        if is_hold[lane]:
+                            holding[lane] = [now, 0]
                         presses += 1
                         done_y[lane], done_t[lane] = y, now
                         tr.reset()
-                        self.set_phase(name, f"pressed {lane}  ({presses} notes)")
+                        self.set_phase(name, f"{'holding' if is_hold[lane] else 'pressed'} {lane}  ({presses} notes)")
                 self.st.graph = {"mode": "lanes", "name": name, "lanes": list(lanes), "notes": upcoming,
                                  "presses": list(self.press_log), "now": now}
         finally:
-            for k in release_at:
+            for k in set(release_at) | set(holding):
                 self.io.key_up(k)
         self.log(f"{name} minigame finished ({presses} notes pressed)")
         if presses:
