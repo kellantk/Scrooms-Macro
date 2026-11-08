@@ -22,3 +22,6 @@ ScroomMacro/
 # Python
 __pycache__/
 *.pyc
+
+# input logger recordings (personal)
+tools/inputs_*.csv
