@@ -1304,9 +1304,47 @@ class WindowsIO:
         if self._mss is None:   # mss handles are per-thread
             self._mss = self._mss_cls()
         cx, cy, _, _ = self.client_rect()
-        shot = self._mss.grab({"left": cx + x0, "top": cy + y0, "width": x1 - x0, "height": y1 - y0})
+        left, top = cx + x0, cy + y0
+        shot = self._mss.grab({"left": left, "top": top, "width": x1 - x0, "height": y1 - y0})
         a = np.frombuffer(shot.raw, np.uint8).reshape(shot.height, shot.width, 4)
-        return a[..., 2::-1]   # BGRA -> RGB
+        a = a[..., 2::-1]   # BGRA -> RGB
+        # the macro's own window can sit on top of the game (it stays on top):
+        # black it out so its buttons/graph aren't mistaken for notes or rings
+        for l, t, r, b in self._own_rects():
+            ix0, iy0 = max(l - left, 0), max(t - top, 0)
+            ix1, iy1 = min(r - left, a.shape[1]), min(b - top, a.shape[0])
+            if ix0 < ix1 and iy0 < iy1:
+                if not a.flags.writeable:
+                    a = a.copy()
+                a[iy0:iy1, ix0:ix1] = 0
+        return a
+
+    def _own_rects(self):
+        """Screen rects of this program's visible windows (refreshed twice a second)."""
+        now = time.perf_counter()
+        if now - getattr(self, "_own_t", -9.0) < 0.5:
+            return self._own
+        rects = []
+        pid = os.getpid()
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def cb(hwnd, _):
+            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+                p = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+                if p.value == pid:
+                    r = _RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(r))
+                    if r.right > r.left and r.bottom > r.top:
+                        rects.append((r.left, r.top, r.right, r.bottom))
+            return True
+
+        try:
+            user32.EnumWindows(cb, 0)
+        except Exception:
+            rects = []
+        self._own, self._own_t = rects, now
+        return rects
 
     # input ----------------------------------------------------------
     def mouse_down(self):

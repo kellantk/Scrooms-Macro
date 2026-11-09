@@ -247,7 +247,7 @@ class App:
         self.v_notify = tk.BooleanVar(value=self.cfg.notify_catches)
         self.v_report = tk.IntVar(value=self.cfg.report_minutes)
         tk.Label(f, text="Webhook URL", bg=CARD, fg=TEXT, font=(FONT, 10)).grid(row=0, column=0, columnspan=2, sticky="w")
-        e = ttk.Entry(f, textvariable=self.v_webhook, show="â€¢", width=52)
+        e = ttk.Entry(f, textvariable=self.v_webhook, show="•", width=52)
         e.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 2))
         tk.Label(f, text="Discord: channel settings > Integrations > Webhooks. It's only ever sent to Discord.",
                  bg=CARD, fg=MUTED, font=(FONT, 8)).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -354,10 +354,10 @@ class App:
         running = self.running() if running is None else running
         k = self.hotkey.upper()
         if running:
-            self.b_start.configure(text=f"â–   Stop   ({k})")
+            self.b_start.configure(text=f"■  Stop   ({k})")
             self.b_start.set_colors(BAD, "#f87171")
         else:
-            self.b_start.configure(text=f"â–¶  Start   ({k})")
+            self.b_start.configure(text=f"▶  Start   ({k})")
             self.b_start.set_colors(ACCENT, ACCENT_HI)
 
     # ------------------------------------------------------------- poll

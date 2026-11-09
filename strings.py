@@ -61,15 +61,26 @@ def _ring_center(mask, h):
             near = (np.abs(xs - cx) < win) & (np.abs(ys - cy) < win)
         if near.sum() < 60:
             continue
-        x0, x1 = xs[near].min(), xs[near].max()
-        y0, y1 = ys[near].min(), ys[near].max()
-        rad = ((x1 - x0) + (y1 - y0)) / 4
+        # the lane's slot outline (a tall rounded shape above the circle) can
+        # be lit too and join the circle: size the circle from its width and
+        # put it at the bottom, then check it really is an empty ring
+        nx, ny = xs[near], ys[near]
+        x0, x1 = nx.min(), nx.max()
+        y1 = ny.max()
+        rad = (x1 - x0) / 2
+        cx, cy = (x0 + x1) / 2, y1 - rad
+        for _ in range(2):      # the slot leans (perspective): width at the circle's middle only
+            mid = np.abs(ny - cy) < 0.35 * rad
+            if mid.sum() < 6:
+                break
+            x0, x1 = nx[mid].min(), nx[mid].max()
+            rad = (x1 - x0) / 2
+            cx, cy = (x0 + x1) / 2, y1 - rad
         if not (0.018 * h < rad < 0.05 * h):
             continue
-        # outline: few pixels near the middle, many on the rim
-        d = np.hypot(xs[near] - cx, ys[near] - cy)
-        rim = ((d > 0.7 * rad) & (d < 1.25 * rad)).mean()
-        if rim < 0.7:
+        rim = _rim(mask, cx, cy, rad, 64)
+        inside = _rim(mask, cx, cy, 0.45 * rad, 32)
+        if rim < 0.6 or inside > 0.3:
             continue
         score = near.sum() * rim
         if best is None or score > best[0]:

@@ -13,6 +13,8 @@ v2.0
 - Update alerts: the app tells you when a new version is out.
 - Strings hold notes (the long bars) are held until the bar ends.
 - Strings notes are hit more on time.
+- Works with the macro window on top of the game.
+- Strings and count-in are found more reliably.
 - Stats now show catches, casts, catches per hour and how long it's been running.
 - Works on every keyboard layout (it presses the physical A/S/D/F keys).
 

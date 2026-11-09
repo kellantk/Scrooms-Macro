@@ -25,12 +25,12 @@ def _white(img):
     return img.min(axis=2) >= 200
 
 
-def _ring_score(white, cx, cy, r, n=96):
+def _ring_score(white, cx, cy, r, n=96, offsets=(-2, -1, 0, 1, 2)):
     """Fraction of points on a circle (radius r) that are white (+-2 px)."""
     H, W = white.shape
     t = np.linspace(0, 2 * np.pi, n, endpoint=False)
     hits = np.zeros(n, bool)
-    for dr in (-2, -1, 0, 1, 2):
+    for dr in offsets:
         xs = np.clip((cx + (r + dr) * np.cos(t)).astype(int), 0, W - 1)
         ys = np.clip((cy + (r + dr) * np.sin(t)).astype(int), 0, H - 1)
         hits |= white[ys, xs]
@@ -66,21 +66,49 @@ def locate(img, h, guess=None):
         step = max(4, int(r_est / 8))
         m = int(1.25 * r_est) + 3
         cands = [(x, y, r_est * f) for y in range(m, H - m, step)
-                 for x in range(m, W - m, step) for f in (0.8, 0.9, 1.0, 1.1, 1.2)]
+                 for x in range(m, W - m, step) for f in (0.92, 1.0, 1.08)]
         # quick pre-filter: needs white pixels around
         cands = [c for c in cands if white[int(c[1]), int(c[0] - c[2])] or white[int(c[1]), int(c[0] + c[2])]
                  or white[int(c[1] - c[2]), int(c[0])] or white[int(c[1] + c[2]), int(c[0])]]
         if len(cands) > 3000:           # keep the worst case bounded
             cands = cands[:: len(cands) // 3000 + 1]
+        # the grid is coarse (a few px off the real ring): score loosely
+        # (+-6 px), then search finely around the best few
+        loose = []
+        for cx, cy, r in cands:
+            s = _ring_score(white, cx, cy, r, 48, (-6, -3, 0, 3, 6))
+            if s >= 0.6:
+                loose.append((s, cx, cy, r))
+        loose.sort(reverse=True)
+        seeds = []
+        for s, cx, cy, r in loose:
+            if all(abs(cx - a) > step or abs(cy - b) > step or abs(r - c) > 0.07 * r for a, b, c in seeds):
+                seeds.append((cx, cy, r))
+            if len(seeds) >= 8:
+                break
+        cands = [(cx + dx, cy + dy, r * f) for cx, cy, r in seeds
+                 for dx in range(-6, 7, 3) for dy in range(-6, 7, 3) for f in (0.94, 0.97, 1.0, 1.03, 1.06)
+                 if 0 <= cx + dx - r * f - 3 and cx + dx + r * f + 3 < W
+                 and 0 <= cy + dy - r * f - 3 and cy + dy + r * f + 3 < H]
+    found = []
     for cx, cy, r in cands:
+        # the circle's size is fixed: a circle still growing in, or a ring
+        # passing by, is not it
+        if guess is None and not 0.92 * r_est <= r <= 1.12 * r_est:
+            continue
         s = _ring_score(white, cx, cy, r, 48)
         if s < 0.6:
             continue
         s = _ring_score(white, cx, cy, r)
         if s >= 0.75 and _dark_inside(img, cx, cy, r) >= 0.6:
-            if best is None or s > best[0]:
-                best = (s, cx, cy, r)
-    return best[1:] if best else None
+            found.append((s, cx, cy, r))
+    if not found:
+        return None
+    # a shrinking ring passing close by also looks like a circle around the
+    # dark middle: the real circle is the innermost one
+    r_min = min(f[3] for f in found)
+    best = max((f for f in found if f[3] <= 1.06 * r_min), key=lambda f: f[0])
+    return best[1:]
 
 
 def ring_radius(img, cx, cy, r0):
