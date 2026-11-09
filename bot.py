@@ -35,6 +35,8 @@ class Config:
     equip_on_start: bool = True
     latency_ms: int = 60          # input -> screen delay to compensate for
     auto_latency: bool = True     # learn latency_ms from where ring clicks actually land
+    note_offset_ms: int = 20      # strings/keys: press this much later (+) or earlier (-)
+                                  # than the note's center reaching the circle (Perfect sits a bit late)
     ring_timeout_s: float = 5.0   # ring up longer than this -> re-equip instrument and recast
     count_in: bool = True         # click the head-start rings before the minigame
     aim_perfect: bool = True      # aim for the darker "Perfect" chunk of the ring
@@ -773,7 +775,7 @@ class Bot:
         note's predicted arrival, so it registers right on the spot.
         Hold notes (strings: a bar trailing the note) keep the key down until
         the bar has slid past the circle."""
-        lat = self.cfg.latency_ms / 1000
+        lat = (self.cfg.latency_ms - self.cfg.note_offset_ms) / 1000
         self.set_phase(name, "notes coming")
         self.log(f"{name} minigame")
         track = {k: Tracker(window=0.6) for k in lanes}

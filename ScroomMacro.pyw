@@ -241,6 +241,10 @@ class App:
         self._check(f, 2, "Auto-tune latency from where circle clicks land", self.v_auto)
         self._row(f, 3, "Wait between catches (s)",
                   ttk.Spinbox(f, from_=0, to=10, increment=0.5, width=7, textvariable=self.v_cooldown))
+        self.v_note_off = tk.IntVar(value=self.cfg.note_offset_ms)
+        self._row(f, 4, "Note timing (ms)",
+                  ttk.Spinbox(f, from_=-150, to=150, increment=5, width=7, textvariable=self.v_note_off),
+                  "Strings/Keys: higher = press later. Getting Good, not Perfect? Try +-10")
 
     def _build_discord(self, f):
         self.v_webhook = tk.StringVar(value=self.cfg.webhook_url)
@@ -284,6 +288,7 @@ class App:
         try:
             c.latency_ms = int(self.v_latency.get())
             c.cooldown_s = float(self.v_cooldown.get())
+            c.note_offset_ms = int(self.v_note_off.get())
             c.max_catches = max(0, int(self.v_repeat_n.get()))
             c.report_minutes = max(0, int(self.v_report.get()))
         except (tk.TclError, ValueError):
