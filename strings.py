@@ -17,11 +17,13 @@ LANES = ("A", "S", "D")
 
 def lane_masks(img):
     """Boolean masks of each lane's color (int16 RGB image)."""
+    # by color difference more than brightness: small windows, low graphics
+    # and recordings blur the thin circle outlines and make them dimmer
     r, g, b = img[..., 0], img[..., 1], img[..., 2]
     return {
-        "A": (g > 190) & (r < 200) & (g - r > 45) & (g - b > 60),      # green (ring is paler)
-        "S": (r > 200) & (g < 160) & (r - g > 70),                     # red
-        "D": (r > 220) & (g > 195) & (b < 190) & (r - b > 50),         # yellow
+        "A": (g > 150) & (r < 200) & (g - r > 40) & (g - b > 35),                   # green
+        "S": (r > 150) & (g < 160) & (r - g > 50) & (r - b > 40),                   # red
+        "D": (r > 160) & (g > 140) & (r - b > 50) & (g - b > 40) & (np.abs(r - g) < 50),  # yellow
     }
 
 
@@ -43,7 +45,10 @@ def _ring_center(mask, h):
     key = gx * 10000 + gy
     vals, counts = np.unique(key, return_counts=True)
     best = None
-    for k in vals[np.argsort(counts)[::-1][:8]]:
+    tried = set()
+    # the densest spots first; other lane-colored things (a green scroom,
+    # a note, text) can be denser than the thin circle outline
+    for k in vals[np.argsort(counts)[::-1][:24]]:
         kx, ky = k // 10000, k % 10000
         cx, cy = (kx + 0.5) * cell, (ky + 0.5) * cell
         win = 0.045 * h
@@ -78,7 +83,15 @@ def _ring_center(mask, h):
             cx, cy = (x0 + x1) / 2, y1 - rad
         if not (0.018 * h < rad < 0.05 * h):
             continue
-        rim = _rim(mask, cx, cy, rad, 64)
+        spot = (round(cx), round(cy), round(rad))
+        if spot in tried:           # several start points end on the same circle
+            continue
+        tried.add(spot)
+        if _rim(mask, cx, cy, 0.96 * rad, 32) < 0.3:     # clearly not a ring
+            continue
+        # fine-fit: the outline's outer blur makes the width a bit too big
+        rim, cx, cy, rad = max((_rim(mask, cx + dx, cy + dy, rad * f, 64), cx + dx, cy + dy, rad * f)
+                               for f in (0.92, 0.96, 1.0) for dx in (-1.5, 0, 1.5) for dy in (-1.5, 0, 1.5))
         inside = _rim(mask, cx, cy, 0.45 * rad, 32)
         if rim < 0.6 or inside > 0.3:
             continue
@@ -139,14 +152,25 @@ def next_notes(img, ox, oy, hw, masks=None):
         rows = m.sum(axis=1)
         filled = np.flatnonzero(rows >= thick)
         holds[lane] = False
-        if filled.size == 0:
+        # lowest pill: last run of filled rows that is tall enough to be a
+        # note (the slot outline's rounded top is a thin arc, not a note)
+        bottom = None
+        end = len(rows)
+        while True:
+            f = filled[filled < end]
+            if f.size == 0:
+                bottom = None
+                break
+            bottom = f[-1]
+            top = bottom
+            while top - 1 >= 0 and rows[top - 1] >= thick:
+                top -= 1
+            if bottom - top + 1 >= 0.25 * r or bottom >= len(rows) - 2:
+                break
+            end = top
+        if bottom is None:
             notes[lane] = None
             continue
-        # lowest pill: last run of filled rows
-        bottom = filled[-1]
-        top = bottom
-        while top - 1 >= 0 and rows[top - 1] >= thick:
-            top -= 1
         if bottom >= len(rows) - 2:
             # the note is sliding under the circle's outline: only part of it
             # shows, so its middle would seem to slow down. Report it hidden
@@ -210,7 +234,17 @@ class StringsFinder:
     def find(self, img, ox, oy, w, h):
         img = img.astype(np.int16)
         masks = lane_masks(img)
-        hw = find_highway(img, ox, oy, h)
+        hw = None
+        if self.hw is not None:
+            # the highway doesn't move: if all three circles are still where
+            # they were, skip the full search
+            old = self.hw
+            if all(_rim(masks[k], old.cx[i] - ox, old.cy - oy, old.r, 48) >= 0.6
+                   and _rim(masks[k], old.cx[i] - ox, old.cy - oy, 0.45 * old.r, 24) <= 0.3
+                   for i, k in enumerate(LANES)):
+                hw = old
+        if hw is None:
+            hw = find_highway(img, ox, oy, h)
         if hw is None:
             self.misses += 1
             # the highway doesn't move; a note sliding into a circle (or a long
