@@ -1,11 +1,6 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
-v2.0.1
-------
-- Fixed: Strings hold notes (the long bars) are now held down until the bar ends.
-- Fixed: Strings notes are hit more on time.
-
 v2.0
 ----
 - Brand new look: dark, cleaner app with a status card, stats and settings tabs.
@@ -16,6 +11,8 @@ v2.0
 - Discord alerts: paste a webhook in the Discord tab to get every catch posted
   with a screenshot, plus a session report every few minutes.
 - Update alerts: the app tells you when a new version is out.
+- Strings hold notes (the long bars) are held until the bar ends.
+- Strings notes are hit more on time.
 - Stats now show catches, casts, catches per hour and how long it's been running.
 - Works on every keyboard layout (it presses the physical A/S/D/F keys).
 

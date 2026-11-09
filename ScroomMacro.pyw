@@ -20,7 +20,7 @@ import notify  # noqa: E402
 import updater  # noqa: E402
 
 APP = "Scroom Macro"
-VERSION = "2.0.1"
+VERSION = "2.0"
 REPO_URL = "https://github.com/kellantk/Scrooms-Macro"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 SETTINGS = os.path.join(BASE, "settings.json")
