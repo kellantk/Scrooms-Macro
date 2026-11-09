@@ -35,8 +35,8 @@ class Config:
     equip_on_start: bool = True
     latency_ms: int = 60          # input -> screen delay to compensate for
     auto_latency: bool = True     # learn latency_ms from where ring clicks actually land
-    note_offset_ms: int = 20      # strings/keys: press this much later (+) or earlier (-)
-                                  # than the note's center reaching the circle (Perfect sits a bit late)
+    note_offset_ms: int = -30     # strings/keys: press this much later (+) or earlier (-) than the
+                                  # usual timing (measured: the macro landed ~30 ms after Perfect's middle)
     ring_timeout_s: float = 5.0   # ring up longer than this -> re-equip instrument and recast
     count_in: bool = True         # click the head-start rings before the minigame
     aim_perfect: bool = True      # aim for the darker "Perfect" chunk of the ring
