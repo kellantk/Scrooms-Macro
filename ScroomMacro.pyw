@@ -20,7 +20,7 @@ import notify  # noqa: E402
 import updater  # noqa: E402
 
 APP = "Scroom Macro"
-VERSION = "2.0"
+VERSION = "2.0.1"
 REPO_URL = "https://github.com/kellantk/Scrooms-Macro"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 SETTINGS = os.path.join(BASE, "settings.json")
@@ -381,6 +381,17 @@ class App:
         self._setting(f, "Stop after", self._spin(self.v_repeat_n, 0, 9999),
                       "Catches. 0 = keep going until you stop it")
         self._setting(f, "Move the cursor to a safe spot", toggle=self.v_cursor)
+        self.v_skeys = tk.StringVar(value=self.cfg.strings_keys)
+        self.v_kkeys = tk.StringVar(value=self.cfg.keys_keys)
+        self._setting(f, "Minigame keybinds", lambda p: self._keybind_boxes(p),
+                      "Strings / Keys, left to right, if you changed them")
+
+    def _keybind_boxes(self, p):
+        box = tk.Frame(p, bg=CARD)
+        ttk.Entry(box, textvariable=self.v_skeys, width=5, justify="center").pack(side="left")
+        tk.Label(box, text="/", bg=CARD, fg=MUTED).pack(side="left", padx=4)
+        ttk.Entry(box, textvariable=self.v_kkeys, width=6, justify="center").pack(side="left")
+        return box
 
     def _build_timing(self, f):
         self.v_latency = tk.IntVar(value=self.cfg.latency_ms)
@@ -484,6 +495,8 @@ class App:
         c.count_in = self.v_countin.get()
         c.aim_perfect = self.v_aim.get() == "Perfect"
         c.move_cursor = self.v_cursor.get()
+        c.strings_keys = self.v_skeys.get().replace(" ", "").upper()[:3] or "ASD"
+        c.keys_keys = self.v_kkeys.get().replace(" ", "").upper()[:4] or "ASDF"
         c.webhook_url = self.v_webhook.get().strip()
         c.discord_user_id = self.v_uid.get().strip()
         c.ping_on_stop = self.v_ping.get()

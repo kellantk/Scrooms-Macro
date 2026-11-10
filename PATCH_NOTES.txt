@@ -1,6 +1,14 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
+v2.0.1
+------
+- Fixed: the tuning (cast) ring wasn't found when the camera was turned and
+  the ring floated near the side of the screen.
+- Fixed: starting the macro shrank a maximized/fullscreen Roblox window.
+- Added: minigame keybinds setting (General tab) for players who changed
+  their strings/keys buttons in the game.
+
 v2.0
 ----
 - Brand new look: dark, cleaner app with a status card, stats and settings tabs.

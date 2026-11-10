@@ -40,7 +40,9 @@ class Config:
                                   # usual timing (measured: the macro landed ~30 ms after Perfect's middle)
     auto_note_timing: bool = True # learn note_offset_ms from when the strings circles light up
     ring_timeout_s: float = 5.0   # ring up longer than this -> re-equip instrument and recast
-    count_in: bool = True         # click the head-start rings before the minigame
+    strings_keys: str = "ASD"     # your in-game keybinds for the strings lanes, left to right
+    keys_keys: str = "ASDF"       # ... and for the keys (piano) columns
+    count_in: bool = True        # click the head-start rings before the minigame
     aim_perfect: bool = True      # aim for the darker "Perfect" chunk of the ring
     cooldown_s: float = 2.5       # wait after a catch before casting again
     max_catches: int = 0          # 0 = run until stopped
@@ -885,20 +887,28 @@ class Bot:
     # ----------------------------------------------------------- strings
     def do_strings(self):
         """Strings: 3-lane highway, keys A S D (notes speed up - perspective)."""
-        self.do_lanes("Strings", self.strings, strings.LANES, 0.38, self.strings_finder)
+        self.do_lanes("Strings", self.strings, strings.LANES, 0.38, self.strings_finder,
+                      keybinds=self.cfg.strings_keys)
 
     def do_keys(self):
         """Keys: Piano-Tiles, 4 columns, keys A S D F (tiles fall at a steady speed)."""
-        self.do_lanes("Keys", self.keys, keys.LANES, 0.22)
+        self.do_lanes("Keys", self.keys, keys.LANES, 0.22, keybinds=self.cfg.keys_keys)
 
-    def do_lanes(self, name, look, lanes, v_frac, finder=None):
+    def do_lanes(self, name, look, lanes, v_frac, finder=None, keybinds=""):
         """Note lanes: press a lane's key as its note reaches the hit spot.
         Notes are tracked per lane; the key goes down `latency` before the
         note's predicted arrival, so it registers right on the spot.
         Hold notes (strings: a bar trailing the note) keep the key down until
-        the bar has slid past the circle."""
+        the bar has slid past the circle.
+        keybinds: the keys you set in the game for the lanes, left to right
+        (the game lets you change them; default = the lane names)."""
         self.set_phase(name, "notes coming")
         self.log(f"{name} minigame")
+        kb = (keybinds or "").replace(" ", "").lower()
+        ok = len(kb) == len(lanes) and all(c in SCANCODES for c in kb)
+        km = {lane: (kb[i] if ok else lane) for i, lane in enumerate(lanes)}
+        if keybinds and not ok:
+            self.log(f"{name}: keybinds '{keybinds}' aren't {len(lanes)} letter keys - using {''.join(lanes)}")
         timer = NoteTimer(lanes) if finder is not None and hasattr(finder, "marks") else None
         tuned = 0                              # timer.errors already used for tuning
         last_hw = None
@@ -918,7 +928,7 @@ class Bot:
                 now = self.io.now()
                 for k, t_up in list(release_at.items()):
                     if now >= t_up:
-                        self.io.key_up(k)
+                        self.io.key_up(km[k])
                         del release_at[k]
                 if prev_t is not None:
                     loop_dt.append(now - prev_t)
@@ -957,7 +967,7 @@ class Bot:
                     h[1] = h[1] + 1 if bar_near.get(lane, 0.0) < 0.3 else 0
                     if (h[1] >= 2 and now - h[0] > 0.12) or now - h[0] > 8.0:
                         if not self.cfg.dry_run:
-                            self.io.key_up(lane)
+                            self.io.key_up(km[lane])
                         del holding[lane]
                         track[lane].reset()
                 upcoming = {}
@@ -1019,9 +1029,9 @@ class Bot:
                         timer.press(lane, tp)
                     if not self.cfg.dry_run:
                         if lane in release_at:
-                            self.io.key_up(lane)
+                            self.io.key_up(km[lane])
                             del release_at[lane]
-                        self.io.key_down(lane)
+                        self.io.key_down(km[lane])
                         if not is_hold[lane]:
                             release_at[lane] = tp + 0.05
                     if is_hold[lane]:
@@ -1034,7 +1044,7 @@ class Bot:
                                  "presses": list(self.press_log), "now": now}
         finally:
             for k in set(release_at) | set(holding):
-                self.io.key_up(k)
+                self.io.key_up(km[k])
         self.log(f"{name} minigame finished ({presses} notes pressed)")
         if timer is not None and timer.errors:
             e = timer.errors
@@ -1557,9 +1567,14 @@ MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
 MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
 MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
 KEYEVENTF_SCANCODE, KEYEVENTF_KEYUP = 0x0008, 0x0002
+# physical key positions (US layout names, like Roblox's key names): the
+# game reads where a key is on the keyboard, so this works on any layout
 SCANCODES = {"1": 0x02, "2": 0x03, "3": 0x04, "4": 0x05, "5": 0x06,
-             "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B,
-             "a": 0x1E, "s": 0x1F, "d": 0x20, "f": 0x21}
+             "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B}
+SCANCODES.update(zip("qwertyuiop", range(0x10, 0x1A)))
+SCANCODES.update(zip("asdfghjkl", range(0x1E, 0x27)))
+SCANCODES.update(zip("zxcvbnm", range(0x2C, 0x33)))
+SCANCODES.update({";": 0x27, "'": 0x28, ",": 0x33, ".": 0x34, "/": 0x35, "[": 0x1A, "]": 0x1B})
 
 
 def _send(inp):
@@ -1658,7 +1673,10 @@ class WindowsIO:
         if not self.hwnd:
             raise RuntimeError("Roblox window not found - open the game first")
         if not self.focused():
-            user32.ShowWindow(self.hwnd, 9)  # SW_RESTORE
+            # SW_RESTORE also un-maximizes a maximized/fullscreen window (it
+            # shrank Roblox): only use it when Roblox is minimized
+            if user32.IsIconic(self.hwnd):
+                user32.ShowWindow(self.hwnd, 9)  # SW_RESTORE
             user32.SetForegroundWindow(self.hwnd)
             time.sleep(0.3)
         if cfg.move_cursor:

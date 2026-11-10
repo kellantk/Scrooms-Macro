@@ -27,6 +27,10 @@ WINDOW
   Pin (top right)    keeps the app on top of the game.
   Arrow (top right)  mini view: only the status and the Start button.
 
+KEYBINDS
+  Changed your strings/keys buttons in the game? Put the same keys in
+  General > Minigame keybinds (left to right, e.g. JKL / WASD).
+
 TIMING
   Latency and Note timing are learned automatically while it plays
   ("Auto-tune" in the Timing tab). Getting "Good" instead of "Perfect"

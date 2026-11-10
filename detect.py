@@ -522,7 +522,9 @@ class RingFinder:
         if self.last:
             cx, cy, r = self.last
             return _clamp_region(cx - 2.2 * r, cy - 2.2 * r, cx + 2.2 * r, cy + 2.2 * r, w, h)
-        return _clamp_region(0.15 * w, 0.08 * h, 0.85 * w, 0.92 * h, w, h)
+        # the whole window: with the camera turned the ring can float far to the
+        # side of the screen (it's next to the character, not in the middle)
+        return _clamp_region(0.01 * w, 0.04 * h, 0.99 * w, 0.96 * h, w, h)
 
     def find(self, img, ox, oy, w, h):
         res = self._find(img, ox, oy, h)
