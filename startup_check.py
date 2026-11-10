@@ -48,7 +48,7 @@ FIX_STEPS = (
     "   (Don't run the app from inside the zip.)\n"
     "3. Check your antivirus' quarantine / Protection history - if it removed a\n"
     "   file from the ScroomMacro folder, restore it and allow the folder.\n"
-    "4. Run App\\ScroomMacro.exe again."
+    "4. Run ScroomMacro.exe again."
 )
 
 

@@ -28,7 +28,8 @@ if exist App\settings.json move /y App\settings.json settings.keep >nul
 if exist App\macro_log.txt move /y App\macro_log.txt macro_log.keep >nul
 if exist App\debug move App\debug debug.keep >nul
 if exist App\bug_report_*.zip move /y App\bug_report_*.zip . >nul
-powershell -NoProfile -Command "Compress-Archive -Path App,README.txt,PATCH_NOTES.txt,ScroomMacro.pyw,bot.py,detect.py,hotkeys.py,strings.py,keys.py,percussion.py,countin.py,notify.py,updater.py,startup_check.py,make_version.py,scroom.ico,build_exe.bat -DestinationPath releases\ScroomMacro_v%VER%.zip"
+rem clean zip: ScroomMacro.exe + _internal + README.txt at the top (the source is on GitHub)
+powershell -NoProfile -Command "Compress-Archive -Path App\*,README.txt -DestinationPath releases\ScroomMacro_v%VER%.zip"
 if exist settings.keep move /y settings.keep App\settings.json >nul
 if exist macro_log.keep move /y macro_log.keep App\macro_log.txt >nul
 if exist debug.keep move debug.keep App\debug >nul

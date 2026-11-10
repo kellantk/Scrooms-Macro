@@ -16,6 +16,14 @@ v2.0
 - Works with the macro window on top of the game.
 - Strings and count-in are found more reliably, also in small game windows.
 - Strings/Keys notes are timed better for more Perfects, plus a Note timing setting.
+- Note timing auto-tune: the macro checks when the strings circles light up
+  and corrects its timing toward Perfect by itself.
+- Notes are pressed at the exact moment instead of on the next screen read.
+- Discord pings: add your Discord user ID to get pinged when the macro stops
+  by itself (Roblox closed, errors, catch goal reached) or gets stuck.
+- Pin button keeps the app on top of the game, plus a mini view.
+- Cleaner settings with on/off switches.
+- Cleaner download: just ScroomMacro.exe, its _internal folder and a README.
 - Stats now show catches, casts, catches per hour and how long it's been running.
 - Works on every keyboard layout (it presses the physical A/S/D/F keys).
 

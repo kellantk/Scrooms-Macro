@@ -15,6 +15,8 @@ import numpy as np
 
 USER_AGENT = "ScroomMacro (+https://github.com/kellantk/Scrooms-Macro)"
 COLOR = 0x7C5CFF
+RED = 0xEF4444
+AMBER = 0xF59E0B
 
 
 def png_bytes(rgb, max_w=1280):
@@ -39,11 +41,21 @@ def valid_url(url):
                            "https://ptb.discord.com/api/webhooks/", "https://canary.discord.com/api/webhooks/"))
 
 
-def send(url, embed, image=None, timeout=10):
-    """POST one embed (+ optional PNG) to a Discord webhook. Returns (ok, message)."""
+def valid_user_id(uid):
+    """A Discord user ID: 17-20 digits (Developer Mode > right-click > Copy User ID)."""
+    uid = (uid or "").strip()
+    return uid.isdigit() and 15 <= len(uid) <= 21
+
+
+def send(url, embed, image=None, timeout=10, ping=None):
+    """POST one embed (+ optional PNG) to a Discord webhook. Returns (ok, message).
+    ping: a Discord user ID to mention (only that user can be pinged)."""
     if not valid_url(url):
         return False, "That isn't a Discord webhook URL."
-    payload = {"username": "Scroom Macro", "embeds": [embed]}
+    payload = {"username": "Scroom Macro", "embeds": [embed], "allowed_mentions": {"parse": []}}
+    if ping and valid_user_id(ping):
+        payload["content"] = f"<@{ping.strip()}>"
+        payload["allowed_mentions"] = {"parse": [], "users": [ping.strip()]}
     if image is not None:
         embed["image"] = {"url": "attachment://catch.png"}
         boundary = uuid.uuid4().hex
@@ -67,9 +79,9 @@ def send(url, embed, image=None, timeout=10):
         return False, str(e)
 
 
-def send_async(url, embed, image=None, on_done=None):
+def send_async(url, embed, image=None, on_done=None, ping=None):
     def run():
-        res = send(url, embed, image)
+        res = send(url, embed, image, ping=ping)
         if on_done:
             on_done(*res)
     threading.Thread(target=run, daemon=True).start()
@@ -94,13 +106,30 @@ def catch_embed(minigame, detail, stats):
     }
 
 
-def report_embed(stats, final=False):
+def stuck_embed(stats, minutes, paused=False):
+    why = ("It's paused because Roblox isn't the active window." if paused else
+           "It keeps trying - check on Roblox (disconnected? a menu open?).")
+    return {
+        "title": "Macro might be stuck",
+        "description": f"No catch in the last {minutes} minutes. {why}",
+        "color": AMBER,
+        "fields": [
+            {"name": "This session", "value": f"{stats['finished']} finished - {stats['casts']} casts", "inline": True},
+            {"name": "Running for", "value": fmt_duration(stats["uptime"]), "inline": True},
+        ],
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def report_embed(stats, final=False, reason=None):
+    """Session report. reason: why the macro stopped by itself (shown red)."""
     per = stats.get("per_minigame") or {}
     lines = "\n".join(f"**{k}**: {v}" for k, v in sorted(per.items(), key=lambda kv: -kv[1])) or "nothing yet"
     rate = stats["finished"] / max(stats["uptime"] / 3600, 1e-9)
     return {
-        "title": "Session report" + (" (stopped)" if final else ""),
-        "color": COLOR,
+        "title": "Macro stopped" if reason else "Session report" + (" (stopped)" if final else ""),
+        **({"description": reason} if reason else {}),
+        "color": RED if reason else COLOR,
         "fields": [
             {"name": "Finished", "value": str(stats["finished"]), "inline": True},
             {"name": "Casts", "value": str(stats["casts"]), "inline": True},

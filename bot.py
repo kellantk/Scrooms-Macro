@@ -37,6 +37,7 @@ class Config:
     auto_latency: bool = True     # learn latency_ms from where ring clicks actually land
     note_offset_ms: int = -30     # strings/keys: press this much later (+) or earlier (-) than the
                                   # usual timing (measured: the macro landed ~30 ms after Perfect's middle)
+    auto_note_timing: bool = True # learn note_offset_ms from when the strings circles light up
     ring_timeout_s: float = 5.0   # ring up longer than this -> re-equip instrument and recast
     count_in: bool = True         # click the head-start rings before the minigame
     aim_perfect: bool = True      # aim for the darker "Perfect" chunk of the ring
@@ -54,6 +55,8 @@ class Config:
     webhook_url: str = ""
     notify_catches: bool = True   # post each finished catch (with a screenshot of the result)
     report_minutes: int = 15      # session report every N minutes (0 = off)
+    discord_user_id: str = ""     # who to ping (Discord user ID)
+    ping_on_stop: bool = True     # ping them when the macro stops by itself or gets stuck
 
 
 @dataclass
@@ -174,6 +177,62 @@ def time_to_reach(tr, now, y_target, v_default):
     return float(T - dt)
 
 
+# strings: a Perfect press lights the circle about this long after the note's
+# middle crosses it (measured on manual Perfect hits: +33..+65 ms)
+NOTE_PERFECT_MS = 45
+STUCK_MINUTES = 10      # no catch for this long -> tell Discord
+
+
+class NoteTimer:
+    """Measures how late each strings press registered: when the note's white
+    core crosses the circle's center vs when the circle lights up (the game
+    took the key). Both are read from the same screen captures, so the
+    capture delay cancels out."""
+
+    def __init__(self, lanes):
+        self.prev = {k: None for k in lanes}               # (t, core y) last read
+        self.cross = {k: deque(maxlen=8) for k in lanes}   # crossing times
+        self.pressed = {k: deque(maxlen=8) for k in lanes}
+        self.pending = {k: deque() for k in lanes}         # lit times waiting for their crossing
+        self.lit = {k: False for k in lanes}
+        self.unlit_t = {k: None for k in lanes}            # last read with the circle dark
+        self.errors = []                                   # ms, lit - crossing
+
+    def press(self, lane, t):
+        self.pressed[lane].append(t)
+
+    def update(self, marks, cy, r, now):
+        for lane, (wy, lit) in marks.items():
+            if lane not in self.prev:
+                continue
+            p = self.prev[lane]
+            if wy is not None and p is not None and p[1] < cy <= wy and wy - p[1] < 1.5 * r and now > p[0]:
+                self.cross[lane].append(p[0] + (cy - p[1]) / (wy - p[1]) * (now - p[0]))
+            self.prev[lane] = (now, wy) if wy is not None else None
+            # a press fills the whole circle with no note left in it (a note
+            # sliding over the circle only covers ~0.6-0.7 of it)
+            on = lit > 0.9 and (wy is None or wy < cy - 1.2 * r)
+            if on and not self.lit[lane]:
+                u = self.unlit_t[lane]
+                # lit somewhere between the last dark read and this one
+                self.pending[lane].append((u + now) / 2 if u is not None and now - u < 0.05 else now)
+            if not on:
+                self.unlit_t[lane] = now
+            self.lit[lane] = on
+            # an early press lights the circle before the note crosses: wait a bit
+            pend = self.pending[lane]
+            while pend and now - pend[0] > 0.15:
+                self._pair(lane, pend.popleft())
+
+    def _pair(self, lane, t_lit):
+        if not any(-0.05 < t_lit - tp < 0.35 for tp in self.pressed[lane]):
+            return          # not one of our presses
+        c = [x for x in self.cross[lane] if -0.1 < t_lit - x < 0.3]
+        if c:
+            x = min(c, key=lambda x: abs(t_lit - x - NOTE_PERFECT_MS / 1000))
+            self.errors.append((t_lit - x) * 1000)
+
+
 def _circ_center(a, tol=math.radians(15)):
     """Robust center of a set of angles: the value with the most neighbours
     within `tol`, then the mean of those neighbours."""
@@ -246,6 +305,9 @@ class Bot:
         self.last_click_t = 0.0
         self.landings = 0
         self._last_report = time.time()
+        self.stop_reason = None        # why it stopped by itself (None = you stopped it)
+        self._last_progress = time.time()
+        self._stuck_alerted = False
         self.press_log = deque(maxlen=40)
         self._last_shot = {}
         self._hold_start = None
@@ -369,6 +431,8 @@ class Bot:
         wait out the cooldown before casting again."""
         self.st.finished += 1
         self.st.per_minigame[name] = self.st.per_minigame.get(name, 0) + 1
+        self._last_progress = time.time()
+        self._stuck_alerted = False
         self.st.graph = {}
         self.set_phase("Cooldown")
         t0 = self.io.now()
@@ -385,13 +449,37 @@ class Bot:
                                   lambda ok, msg: None if ok else self.log(f"Discord: couldn't post ({msg})"))
             self.io.sleep(0.05)
 
+    def ping_id(self):
+        uid = (self.cfg.discord_user_id or "").strip()
+        return uid if self.cfg.ping_on_stop and notify.valid_user_id(uid) else None
+
+    def stop_with(self, reason):
+        """Stop by itself (Discord gets told why, with a ping)."""
+        if self.stop_reason is None:
+            self.stop_reason = reason
+        self.log(f"Stopping: {reason}")
+        self.stop_event.set()
+
     def maybe_report(self, final=False):
-        if not self.webhook_on() or self.cfg.report_minutes <= 0:
+        if not self.webhook_on():
             return
         now = time.time()
         if final:
-            if self.st.finished:
+            if self.stop_reason:          # stopped by itself: always say so (and ping)
+                notify.send_async(self.cfg.webhook_url,
+                                  notify.report_embed(self.stats(), final=True, reason=self.stop_reason),
+                                  ping=self.ping_id())
+            elif self.st.finished and self.cfg.report_minutes > 0:
                 notify.send_async(self.cfg.webhook_url, notify.report_embed(self.stats(), final=True))
+            return
+        if now - self._last_progress >= STUCK_MINUTES * 60 and not self._stuck_alerted:
+            self._stuck_alerted = True
+            self.log(f"No catch in {STUCK_MINUTES} minutes - telling Discord")
+            self.snapshot("stuck")
+            notify.send_async(self.cfg.webhook_url,
+                              notify.stuck_embed(self.stats(), STUCK_MINUTES, paused=self.st.phase == "Paused"),
+                              ping=self.ping_id())
+        if self.cfg.report_minutes <= 0:
             return
         if now - self._last_report >= 60 * self.cfg.report_minutes:
             self._last_report = now
@@ -437,16 +525,22 @@ class Bot:
         while not self.stopped() and not self.io.focused():
             if self.held:
                 self.hold(False)
+            alive = getattr(self.io, "window_alive", None)
+            if alive is not None and not alive():
+                self.stop_with("Roblox closed (or crashed).")
+                return
             if not warned:
                 self.set_phase("Paused", "Roblox isn't the active window")
                 warned = True
+            self.maybe_report()
             self.io.sleep(0.2)
 
     # --------------------------------------------------------------- main
     def run(self):
         self.stop_event.clear()
         self.st.session_start = time.time()
-        self._last_report = time.time()
+        self._last_report = self._last_progress = time.time()
+        self.stop_reason = None
         try:
             self.io.prepare(self.cfg)
             if self.cfg.equip_on_start and self.cfg.equip_key and not self.cfg.dry_run:
@@ -456,7 +550,7 @@ class Bot:
             errors = 0
             while not self.stopped():
                 if self.cfg.max_catches and self.st.finished >= self.cfg.max_catches:
-                    self.log(f"Reached {self.cfg.max_catches} catches")
+                    self.stop_with(f"Done: reached your goal of {self.cfg.max_catches} catches.")
                     break
                 try:
                     self.cycle()
@@ -468,14 +562,16 @@ class Bot:
                     self.log(f"Error ({type(e).__name__}: {e}) - recovering")
                     self.log_traceback()
                     if errors >= 5:
-                        self.log("5 errors in a row - stopping")
+                        alive = getattr(self.io, "window_alive", None)
+                        self.stop_with("Roblox closed (or crashed)." if alive is not None and not alive()
+                                       else f"5 errors in a row ({type(e).__name__}: {e}). Make a bug report.")
                         raise
                     self.io.sleep(1.0)
         finally:
             self.hold(False)
             self.st.graph = {}
             self.maybe_report(final=True)
-            self.set_phase("Stopped")
+            self.set_phase("Stopped", self.stop_reason or "")
 
     def cycle(self):
         """One cast -> ring -> (count-in) -> minigame attempt."""
@@ -699,6 +795,21 @@ class Bot:
             msg += f" -> latency now {self.cfg.latency_ms} ms"
         self.log(msg)
 
+    def tune_notes(self, errs):
+        """Nudge note_offset_ms so strings presses land where Perfect is.
+        errs: recent presses, ms the key registered after the note's middle."""
+        if not self.cfg.auto_note_timing or self.cfg.dry_run:
+            return
+        med = float(np.median(errs))
+        diff = med - NOTE_PERFECT_MS
+        if abs(diff) < 8:                      # already in the Perfect window
+            return
+        old = self.cfg.note_offset_ms
+        step = max(-25.0, min(25.0, 0.6 * diff))
+        self.cfg.note_offset_ms = int(round(max(-150, min(150, old - step))))
+        self.log(f"Note timing: presses landed {abs(diff):.0f} ms {'late' if diff > 0 else 'early'} "
+                 f"-> note timing {old} -> {self.cfg.note_offset_ms} ms")
+
     # ---------------------------------------------------------- count-in
     def do_countin(self):
         """Rings shrink onto the circle around the scroom: click as each one
@@ -775,9 +886,11 @@ class Bot:
         note's predicted arrival, so it registers right on the spot.
         Hold notes (strings: a bar trailing the note) keep the key down until
         the bar has slid past the circle."""
-        lat = (self.cfg.latency_ms - self.cfg.note_offset_ms) / 1000
         self.set_phase(name, "notes coming")
         self.log(f"{name} minigame")
+        timer = NoteTimer(lanes) if finder is not None and hasattr(finder, "marks") else None
+        tuned = 0                              # timer.errors already used for tuning
+        last_hw = None
         track = {k: Tracker(window=0.6) for k in lanes}
         is_hold = {k: False for k in lanes}    # the note we follow is a hold note
         holding = {}                           # lane -> [time down, reads without the bar]
@@ -809,9 +922,23 @@ class Bot:
                     continue
                 gone_since = None
                 hw, notes = res
+                if finder is not None:
+                    # the highway never moves while notes come; if it changes size
+                    # it's closing (end of the minigame): drop the notes we follow
+                    if last_hw is not None and (abs(hw.r - last_hw.r) > 0.15 * last_hw.r
+                                                or abs(hw.cy - last_hw.cy) > 0.5 * last_hw.r):
+                        for tr in track.values():
+                            tr.reset()
+                    last_hw = hw
                 holds = getattr(finder, "holds", None) or {}
                 bar_near = getattr(finder, "bar_near", None) or {}
                 frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
+                lat = (self.cfg.latency_ms - self.cfg.note_offset_ms) / 1000
+                if timer is not None:
+                    timer.update(finder.marks, hw.cy, hw.r, now)
+                    if len(timer.errors) - tuned >= 4:
+                        tuned = len(timer.errors)
+                        self.tune_notes(timer.errors[-8:])
                 v_default = v_frac * self.io.client_size()[1]      # px/s near the hit spot
                 # hold notes: let go once the bar has passed (2 reads in a row
                 # without it, so one bad frame doesn't drop the hold)
@@ -823,6 +950,7 @@ class Bot:
                         del holding[lane]
                         track[lane].reset()
                 upcoming = {}
+                due = []                               # (press time, lane, y)
                 for i, lane in enumerate(lanes):
                     if lane in holding:
                         continue
@@ -831,15 +959,19 @@ class Bot:
                     if y is None:
                         # notes slip out of view just above the circle (its outline
                         # hides them) - keep going on where it must be by now
-                        if tr.x is not None and len(tr.samples) >= 2 and now - tr.samples[-1][0] < 0.4:
+                        # (strings: only one that vanished next to the circle - one
+                        # vanishing far up the lane is gone, not hidden)
+                        near = finder is None or (tr.x is not None and tr.x > hw.cy - 3 * hw.r)
+                        if tr.x is not None and len(tr.samples) >= 2 and now - tr.samples[-1][0] < 0.4 and near:
                             y = note_pos(tr, now, v_default)
                             if y > hw.cy + hw.r:          # long past the circle: it's gone
                                 tr.reset()
                                 continue
                             predicted = True
                         else:
-                            tr.reset()
-                            continue
+                            if near:
+                                tr.reset()
+                            continue      # far up: a missed read - wait for the next one
                     else:
                         predicted = False
                     # a note higher up than the one we were following = a new note
@@ -863,27 +995,42 @@ class Bot:
                         continue
                     t_hit = time_to_reach(tr, now, hw.cy, v_default)
                     upcoming[lane] = [t_hit]
-                    if t_hit - lat <= frame_dt * 0.5:
-                        self.press_log.append((now, lane))
-                        if not self.cfg.dry_run:
-                            if lane in release_at:
-                                self.io.key_up(lane)
-                                del release_at[lane]
-                            self.io.key_down(lane)
-                            if not is_hold[lane]:
-                                release_at[lane] = now + 0.05
-                        if is_hold[lane]:
-                            holding[lane] = [now, 0]
-                        presses += 1
-                        done_y[lane], done_t[lane] = y, now
-                        tr.reset()
-                        self.set_phase(name, f"{'holding' if is_hold[lane] else 'pressed'} {lane}  ({presses} notes)")
+                    # due before the next read comes in: press it this round,
+                    # at the exact moment (not up to a whole frame early/late)
+                    if t_hit - lat <= frame_dt:
+                        due.append((now + t_hit - lat, lane, y))
+                for t_press, lane, y in sorted(due):
+                    if t_press > self.io.now():
+                        self.io.wait_until(min(t_press, now + 2 * frame_dt))
+                    tp = self.io.now()
+                    self.press_log.append((tp, lane))
+                    if timer is not None:
+                        timer.press(lane, tp)
+                    if not self.cfg.dry_run:
+                        if lane in release_at:
+                            self.io.key_up(lane)
+                            del release_at[lane]
+                        self.io.key_down(lane)
+                        if not is_hold[lane]:
+                            release_at[lane] = tp + 0.05
+                    if is_hold[lane]:
+                        holding[lane] = [tp, 0]
+                    presses += 1
+                    done_y[lane], done_t[lane] = y, tp
+                    track[lane].reset()
+                    self.set_phase(name, f"{'holding' if is_hold[lane] else 'pressed'} {lane}  ({presses} notes)")
                 self.st.graph = {"mode": "lanes", "name": name, "lanes": list(lanes), "notes": upcoming,
                                  "presses": list(self.press_log), "now": now}
         finally:
             for k in set(release_at) | set(holding):
                 self.io.key_up(k)
         self.log(f"{name} minigame finished ({presses} notes pressed)")
+        if timer is not None and timer.errors:
+            e = timer.errors
+            self.log(f"Note timing: {len(e)} presses measured, keys landed {np.median(e):+.0f} ms after the notes' "
+                     f"middle (Perfect is about {NOTE_PERFECT_MS:+d}), spread {min(e):+.0f}..{max(e):+.0f}")
+            if len(e) - tuned >= 2:
+                self.tune_notes(e[-8:])
         if presses:
             self.minigame_done(name, f"{presses} notes hit")
 
@@ -1261,6 +1408,10 @@ class WindowsIO:
             self.hwnd = None
         return self.hwnd
 
+    def window_alive(self):
+        """Is the game still open? (a minimized window still counts)"""
+        return bool(self.hwnd and user32.IsWindow(self.hwnd)) or bool(self.find_window())
+
     def client_rect(self):
         if not self.hwnd or not user32.IsWindow(self.hwnd):
             if not self.find_window():
@@ -1289,6 +1440,13 @@ class WindowsIO:
         return False
 
     def prepare(self, cfg):
+        try:    # a bit above normal priority: steadier timing while the game runs
+            kernel32 = ctypes.WinDLL("kernel32")
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x8000)   # ABOVE_NORMAL
+        except Exception:
+            pass
         self.find_window()
         if not self.hwnd:
             raise RuntimeError("Roblox window not found - open the game first")

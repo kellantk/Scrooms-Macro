@@ -15,7 +15,7 @@ use any exploit. All the code is here so you can check exactly what it does.
 Get the latest `ScroomMacro_vX.X.X.zip` from the **Releases** page, then:
 
 1. Right-click the zip → **Extract All…** → **Extract** (don't run it from inside the zip).
-2. Open the extracted folder → **App** → double-click **ScroomMacro.exe**.
+2. Open the extracted folder → double-click **ScroomMacro.exe** (keep the `_internal` folder next to it).
 3. If Windows says *"Windows protected your PC"*: **More info** → **Run anyway**
    (the app isn't code-signed).
 4. In Roblox, stand where you fish and press **F6** to start / stop.
@@ -27,7 +27,7 @@ the zip it creates.
 
 | File | What it does |
 |---|---|
-| `ScroomMacro.pyw` | The app window (OP Auto Clicker style), settings, hotkey, bug reports |
+| `ScroomMacro.pyw` | The app window: status, live view, settings, hotkey, pin-on-top / mini view, bug reports |
 | `bot.py` | The macro: cast → ring → frequency → reel, timing/physics, failsafes, Windows input & screen capture |
 | `detect.py` | Finds each minigame on screen at any window size and reads positions from it |
 | `hotkeys.py` | The start/stop hotkey (Windows `RegisterHotKey` - no keyboard hook) |
@@ -49,6 +49,9 @@ the zip it creates.
 - **Ring:** finds the ring by its green zone, measures the needle's speed and direction, and
   clicks on the calculated position. After each click it reads where the needle froze and
   learns your PC's delay (*auto-tune latency*).
+- **Strings:** tracks each note down its lane and presses at the predicted moment it reaches the
+  circle. It then times when the circle lights up against when the note crossed it, and nudges
+  the timing toward Perfect (*auto-tune note timing*).
 - **Frequency:** holding speeds the pin up to the right, releasing to the left. A
   bang-bang controller using the pin's measured acceleration brakes it onto the dot.
 - **Reel:** your clicks move the `< o >` dot, the scroom chases the dot, and the box moves on
@@ -64,8 +67,10 @@ saved next to the exe.
 ## Discord alerts
 
 Paste a channel webhook URL in the app's **Discord** tab. Every catch is posted with a screenshot
-of the result, plus a session report every N minutes. The URL is only ever sent to Discord, and
-it's removed from bug reports.
+of the result, plus a session report every N minutes. Add your Discord user ID to get **pinged**
+when the macro stops by itself (Roblox closed, errors, catch goal reached) or gets stuck (no catch
+in 10 minutes). The URL and your ID are only ever sent to Discord, and they're removed from bug
+reports.
 
 ## Run / build from source
 

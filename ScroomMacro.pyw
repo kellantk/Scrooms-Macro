@@ -26,18 +26,23 @@ BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.p
 SETTINGS = os.path.join(BASE, "settings.json")
 
 # ---------------------------------------------------------------- theme
-BG = "#101217"
-CARD = "#181b22"
-FIELD = "#20242d"
-BORDER = "#2a2f3a"
-TEXT = "#e9ebf1"
-MUTED = "#8a91a0"
+BG = "#0f1115"
+CARD = "#171a21"
+FIELD = "#1f232c"
+HOVER = "#2a2f3b"
+BORDER = "#262b35"
+TEXT = "#eceef3"
+MUTED = "#8b93a3"
+DIM = "#5d6474"
 ACCENT = "#8b5cf6"
 ACCENT_HI = "#a78bfa"
 GOOD = "#22c55e"
 BAD = "#ef4444"
 WARN = "#f59e0b"
 FONT = "Segoe UI"
+FONT_SB = "Segoe UI Semibold"
+ICONS = "Segoe MDL2 Assets"          # Windows 10/11 icon font
+IC_PIN, IC_PINNED, IC_UP, IC_DOWN = "", "", "", ""
 LANE_COLORS = {
     "Strings": {"A": "#4ade80", "S": "#f87171", "D": "#facc15"},
     "Keys": {"A": "#e5e7eb", "S": "#e5e7eb", "D": "#e5e7eb", "F": "#e5e7eb"},
@@ -45,28 +50,31 @@ LANE_COLORS = {
 }
 PHASE_COLORS = {"Stopped": MUTED, "Paused": WARN, "Error": BAD, "Cooldown": MUTED,
                 "Casting": ACCENT_HI, "Waiting for minigame": ACCENT_HI}
+UI_KEYS = {"hotkey": "f6", "pin_on_top": False, "compact": False, "tab": "General"}
 
 
 def load_settings():
-    cfg, hotkey = bot.Config(), "f6"
+    cfg, ui = bot.Config(), dict(UI_KEYS)
     try:
         with open(SETTINGS) as f:
             data = json.load(f)
-        hotkey = data.pop("hotkey", hotkey)
+        for k in UI_KEYS:
+            if k in data:
+                ui[k] = type(UI_KEYS[k])(data.pop(k))
         for k, v in data.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, type(getattr(cfg, k))(v))
     except (OSError, ValueError, TypeError):
         pass
-    return cfg, hotkey
+    return cfg, ui
 
 
-def save_settings(cfg, hotkey):
+def save_settings(cfg, ui):
     try:
         data = asdict(cfg)
         data.pop("dry_run", None)
         with open(SETTINGS, "w") as f:
-            json.dump({**data, "hotkey": hotkey}, f, indent=2)
+            json.dump({**data, **ui}, f, indent=2)
     except OSError:
         pass
 
@@ -75,38 +83,30 @@ def setup_style(root):
     root.configure(bg=BG)
     s = ttk.Style(root)
     s.theme_use("clam")
-    s.configure(".", background=BG, foreground=TEXT, font=(FONT, 10), bordercolor=BORDER,
+    s.configure(".", background=CARD, foreground=TEXT, font=(FONT, 10), bordercolor=BORDER,
                 lightcolor=BORDER, darkcolor=BORDER, troughcolor=FIELD, focuscolor=ACCENT)
-    s.configure("Card.TFrame", background=CARD)
-    s.configure("TFrame", background=BG)
-    s.configure("TLabel", background=CARD, foreground=TEXT)
-    s.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=(FONT, 9))
-    s.configure("TCheckbutton", background=CARD, foreground=TEXT, indicatorbackground=FIELD,
-                indicatorforeground=TEXT, padding=(0, 4))
-    s.map("TCheckbutton", background=[("active", CARD)], indicatorbackground=[("selected", ACCENT), ("active", BORDER)])
     for w in ("TEntry", "TSpinbox", "TCombobox"):
         s.configure(w, fieldbackground=FIELD, foreground=TEXT, background=FIELD, arrowcolor=MUTED,
-                    insertcolor=TEXT, padding=5, selectbackground=ACCENT, selectforeground="white")
+                    insertcolor=TEXT, padding=(8, 5), selectbackground=ACCENT, selectforeground="white",
+                    bordercolor=FIELD, lightcolor=FIELD, darkcolor=FIELD)
         s.map(w, fieldbackground=[("readonly", FIELD)], foreground=[("readonly", TEXT)],
-              bordercolor=[("focus", ACCENT)], lightcolor=[("focus", ACCENT)], darkcolor=[("focus", ACCENT)])
-    s.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
-    s.configure("TNotebook.Tab", background=BG, foreground=MUTED, padding=(14, 7), borderwidth=0, font=(FONT, 10))
-    s.map("TNotebook.Tab", background=[("selected", CARD)], foreground=[("selected", TEXT)],
-          lightcolor=[("selected", CARD)], bordercolor=[("selected", CARD)])
+              bordercolor=[("focus", ACCENT)], lightcolor=[("focus", ACCENT)], darkcolor=[("focus", ACCENT)],
+              arrowcolor=[("active", TEXT)])
     s.configure("Ghost.TButton", background=FIELD, foreground=TEXT, borderwidth=0, padding=(10, 6), font=(FONT, 9))
-    s.map("Ghost.TButton", background=[("active", BORDER), ("pressed", BORDER)])
+    s.map("Ghost.TButton", background=[("active", HOVER), ("pressed", HOVER)])
     root.option_add("*TCombobox*Listbox.background", FIELD)
     root.option_add("*TCombobox*Listbox.foreground", TEXT)
     root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
     root.option_add("*TCombobox*Listbox.font", (FONT, 10))
 
 
+# ---------------------------------------------------------------- widgets
 class FlatButton(tk.Label):
     """A big flat button (tk buttons can't be styled cleanly on Windows)."""
 
-    def __init__(self, master, text, command, bg=ACCENT, hover=ACCENT_HI, **kw):
-        super().__init__(master, text=text, bg=bg, fg="white", font=(FONT, 12, "bold"),
-                         pady=11, cursor="hand2", **kw)
+    def __init__(self, master, text, command, bg=ACCENT, hover=ACCENT_HI, fg="white", font=(FONT, 12, "bold"),
+                 pady=11, **kw):
+        super().__init__(master, text=text, bg=bg, fg=fg, font=font, pady=pady, cursor="hand2", **kw)
         self.command, self.base, self.hover = command, bg, hover
         self.bind("<Button-1>", lambda e: self.command())
         self.bind("<Enter>", lambda e: self.configure(bg=self.hover))
@@ -117,10 +117,136 @@ class FlatButton(tk.Label):
         self.configure(bg=bg)
 
 
+def ghost(master, text, command):
+    return FlatButton(master, text, command, bg=FIELD, hover=HOVER, fg=TEXT, font=(FONT, 9), pady=7, padx=10)
+
+
+class Tooltip:
+    def __init__(self, widget, text):
+        self.widget, self.text, self.win, self.job = widget, text, None, None
+        widget.bind("<Enter>", self._later, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<Button-1>", self._hide, add="+")
+
+    def _later(self, _):
+        self.job = self.widget.after(450, self._show)
+
+    def _show(self):
+        if self.win:
+            return
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.win = tk.Toplevel(self.widget, bg=BORDER, padx=1, pady=1)
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        tk.Label(self.win, text=self.text() if callable(self.text) else self.text, bg=FIELD, fg=TEXT,
+                 font=(FONT, 8), padx=8, pady=4).pack()
+        self.win.update_idletasks()
+        self.win.geometry(f"+{x - self.win.winfo_width() // 2}+{y}")
+
+    def _hide(self, _=None):
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.win:
+            self.win.destroy()
+            self.win = None
+
+
+class IconButton(tk.Label):
+    """A small square icon button (Windows icon font) that can show an on state."""
+
+    def __init__(self, master, glyph, command, tip, bg=BG):
+        super().__init__(master, text=glyph, font=(ICONS, 11), bg=bg, fg=MUTED, width=3, pady=4, cursor="hand2")
+        self.base = bg
+        self.on = False
+        self.bind("<Button-1>", lambda e: command())
+        self.bind("<Enter>", lambda e: self.configure(bg=FIELD, fg=TEXT if not self.on else ACCENT_HI))
+        self.bind("<Leave>", lambda e: self.configure(bg=self.base, fg=ACCENT_HI if self.on else MUTED))
+        Tooltip(self, tip)
+
+    def set(self, glyph, on):
+        self.on = on
+        self.configure(text=glyph, fg=ACCENT_HI if on else MUTED)
+
+
+class Toggle(tk.Canvas):
+    """An on/off switch bound to a BooleanVar."""
+    W, H = 38, 22
+
+    def __init__(self, master, var, bg=CARD):
+        super().__init__(master, width=self.W, height=self.H, bg=bg, highlightthickness=0, cursor="hand2")
+        self.var = var
+        self.bind("<Button-1>", lambda e: self.flip())
+        var.trace_add("write", lambda *a: self.draw())
+        self.draw()
+
+    def flip(self):
+        self.var.set(not self.var.get())
+
+    def draw(self):
+        self.delete("all")
+        on = bool(self.var.get())
+        col = ACCENT if on else "#3a404d"
+        h = self.H - 2
+        self.create_oval(1, 1, 1 + h, 1 + h, fill=col, outline=col)
+        self.create_oval(self.W - 1 - h, 1, self.W - 1, 1 + h, fill=col, outline=col)
+        self.create_rectangle(1 + h / 2, 1, self.W - 1 - h / 2, 1 + h, fill=col, outline=col)
+        x = self.W - 1 - h / 2 if on else 1 + h / 2
+        self.create_oval(x - h / 2 + 3, 4, x + h / 2 - 3, self.H - 4, fill="white", outline="")
+
+
+class Tabs(tk.Frame):
+    """Underlined text tabs over one card; all pages share the card's size."""
+
+    def __init__(self, master, on_change=None):
+        super().__init__(master, bg=BG)
+        self.bar = tk.Frame(self, bg=BG)
+        self.bar.pack(fill="x")
+        self.body = tk.Frame(self, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        self.body.pack(fill="both", expand=True)
+        self.body.grid_rowconfigure(0, weight=1)
+        self.body.grid_columnconfigure(0, weight=1)
+        self.pages, self.heads = {}, {}
+        self.current = None
+        self.on_change = on_change
+
+    def add(self, title):
+        page = tk.Frame(self.body, bg=CARD, padx=16, pady=6)
+        page.grid(row=0, column=0, sticky="nsew")
+        head = tk.Frame(self.bar, bg=BG, cursor="hand2")
+        head.pack(side="left", padx=(0, 4))
+        lbl = tk.Label(head, text=title, bg=BG, fg=MUTED, font=(FONT_SB, 10), padx=12, pady=6, cursor="hand2")
+        lbl.pack()
+        line = tk.Frame(head, bg=BG, height=2)
+        line.pack(fill="x")
+        for w in (head, lbl):
+            w.bind("<Button-1>", lambda e, t=title: self.select(t))
+        lbl.bind("<Enter>", lambda e, t=title: t != self.current and lbl.configure(fg=TEXT))
+        lbl.bind("<Leave>", lambda e, t=title: t != self.current and lbl.configure(fg=MUTED))
+        self.pages[title], self.heads[title] = page, (lbl, line)
+        if self.current is None:
+            self.select(title)
+        return page
+
+    def select(self, title):
+        if title not in self.pages:
+            return
+        self.current = title
+        for t, (lbl, line) in self.heads.items():
+            lbl.configure(fg=TEXT if t == title else MUTED)
+            line.configure(bg=ACCENT if t == title else BG)
+        self.pages[title].tkraise()
+        if self.on_change:
+            self.on_change(title)
+
+
+# ------------------------------------------------------------------- app
 class App:
     def __init__(self, root):
         self.root = root
-        self.cfg, self.hotkey = load_settings()
+        self.cfg, self.ui = load_settings()
+        self.hotkey = self.ui["hotkey"]
         self.status = bot.Status()
         self.bot = None
         self.thread = None
@@ -137,21 +263,28 @@ class App:
             pass
         setup_style(root)
 
-        outer = tk.Frame(root, bg=BG, padx=16, pady=14)
+        outer = tk.Frame(root, bg=BG, padx=16, pady=12)
         outer.pack(fill="both", expand=True)
 
         # ---- header ----------------------------------------------------
         head = tk.Frame(outer, bg=BG)
         head.pack(fill="x")
         tk.Label(head, text=APP, bg=BG, fg=TEXT, font=(FONT, 15, "bold")).pack(side="left")
-        tk.Label(head, text=f"v{VERSION}", bg=BORDER, fg=MUTED, font=(FONT, 8, "bold"), padx=6).pack(side="left", padx=8, pady=(4, 0))
+        tk.Label(head, text=f"v{VERSION}", bg=FIELD, fg=MUTED, font=(FONT, 8, "bold"), padx=7, pady=1).pack(
+            side="left", padx=8, pady=(5, 0))
+        self.b_pin = IconButton(head, IC_PIN, self.toggle_pin,
+                                lambda: "Stop keeping this window on top" if self.ui["pin_on_top"] else "Keep this window on top")
+        self.b_pin.pack(side="right")
+        self.b_compact = IconButton(head, IC_UP, self.toggle_compact,
+                                    lambda: "Show settings" if self.ui["compact"] else "Mini view (hide settings)")
+        self.b_compact.pack(side="right", padx=(0, 2))
         self.update_pill = tk.Label(head, text="", bg=BG, fg=GOOD, font=(FONT, 9, "bold"), cursor="hand2")
-        self.update_pill.pack(side="right")
+        self.update_pill.pack(side="right", padx=(0, 8))
         self.update_pill.bind("<Button-1>", lambda e: self.update_info and webbrowser.open(self.update_info[1]))
 
         # ---- status card -----------------------------------------------
         card = tk.Frame(outer, bg=CARD, padx=14, pady=12, highlightthickness=1, highlightbackground=BORDER)
-        card.pack(fill="x", pady=(12, 0))
+        card.pack(fill="x", pady=(10, 0))
         row = tk.Frame(card, bg=CARD)
         row.pack(fill="x")
         self.dot = tk.Canvas(row, width=12, height=12, bg=CARD, highlightthickness=0)
@@ -159,16 +292,16 @@ class App:
         self.dot_id = self.dot.create_oval(1, 1, 11, 11, fill=MUTED, outline="")
         self.l_phase = tk.Label(row, text="Stopped", bg=CARD, fg=TEXT, font=(FONT, 13, "bold"))
         self.l_phase.pack(side="left", padx=(8, 0))
-        self.l_fps = tk.Label(row, text="", bg=CARD, fg=MUTED, font=(FONT, 9))
+        self.l_fps = tk.Label(row, text="", bg=CARD, fg=DIM, font=(FONT, 9))
         self.l_fps.pack(side="right")
-        self.l_detail = tk.Label(card, text="Press Start or your hotkey while Roblox is open", bg=CARD, fg=MUTED,
-                                 font=(FONT, 9), anchor="w")
+        self.l_detail = tk.Label(card, text="", bg=CARD, fg=MUTED, font=(FONT, 9), anchor="w")
         self.l_detail.pack(fill="x", pady=(2, 10))
 
         tiles = tk.Frame(card, bg=CARD)
         tiles.pack(fill="x")
         self.tiles = {}
-        for i, (key, label) in enumerate((("finished", "Catches"), ("casts", "Casts"), ("rate", "Per hour"), ("uptime", "Running"))):
+        for i, (key, label) in enumerate((("finished", "Catches"), ("casts", "Casts"), ("rate", "Per hour"),
+                                          ("uptime", "Running"))):
             t = tk.Frame(tiles, bg=FIELD, padx=10, pady=7)
             t.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0))
             tiles.columnconfigure(i, weight=1, uniform="t")
@@ -177,43 +310,62 @@ class App:
             tk.Label(t, text=label, bg=FIELD, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
             self.tiles[key] = v
 
-        self.graph = tk.Canvas(card, width=470, height=150, bg=FIELD, highlightthickness=0)
+        self.graph = tk.Canvas(card, width=460, height=118, bg=FIELD, highlightthickness=0)
         self.graph.pack(fill="x", pady=(10, 0))
 
         # ---- start button ----------------------------------------------
         self.b_start = FlatButton(outer, "", self.toggle)
         self.b_start.pack(fill="x", pady=(12, 12))
 
-        # ---- settings tabs ---------------------------------------------
-        nb = ttk.Notebook(outer)
-        nb.pack(fill="both", expand=True)
-        self._build_general(self._tab(nb, "General"))
-        self._build_timing(self._tab(nb, "Timing"))
-        self._build_discord(self._tab(nb, "Discord"))
-        self._build_more(self._tab(nb, "More"))
+        # ---- settings --------------------------------------------------
+        self.tabs = Tabs(outer, on_change=self._tab_changed)
+        self.tabs.pack(fill="both", expand=True)
+        self._build_general(self.tabs.add("General"))
+        self._build_timing(self.tabs.add("Timing"))
+        self._build_discord(self.tabs.add("Discord"))
+        self._build_more(self.tabs.add("More"))
+        self.tabs.select(self.ui.get("tab", "General"))
 
         self.update_start_button()
         self.apply_hotkey()
+        self.set_pin(self.ui["pin_on_top"])
+        self.set_compact(self.ui["compact"])
         root.protocol("WM_DELETE_WINDOW", self.quit)
         threading.Thread(target=self._check_update, daemon=True).start()
         self.poll()
 
-    # ------------------------------------------------------------- tabs
-    def _tab(self, nb, title):
-        f = tk.Frame(nb, bg=CARD, padx=14, pady=10)
-        nb.add(f, text=title)
-        f.columnconfigure(1, weight=1)
-        return f
-
-    def _row(self, parent, r, label, widget, hint=None):
-        tk.Label(parent, text=label, bg=CARD, fg=TEXT, font=(FONT, 10)).grid(row=r, column=0, sticky="w", pady=5)
-        widget.grid(row=r, column=1, sticky="e", pady=5)
+    # ------------------------------------------------------- settings ui
+    def _setting(self, page, title, control=None, hint=None, toggle=None):
+        """One settings row: title (+ hint) on the left, its control on the right.
+        control: function(parent) -> widget. toggle: a BooleanVar (makes a switch)."""
+        if page.winfo_children():
+            tk.Frame(page, bg=BORDER, height=1).pack(fill="x")
+        row = tk.Frame(page, bg=CARD)
+        row.pack(fill="x", pady=6)
+        left = tk.Frame(row, bg=CARD)
+        left.pack(side="left", fill="x", expand=True)
+        t = tk.Label(left, text=title, bg=CARD, fg=TEXT, font=(FONT_SB, 10), anchor="w")
+        t.pack(fill="x")
+        self._last_hint = None
         if hint:
-            tk.Label(parent, text=hint, bg=CARD, fg=MUTED, font=(FONT, 8)).grid(row=r + 1, column=0, columnspan=2,
-                                                                               sticky="w", pady=(0, 4))
+            self._last_hint = tk.Label(left, text=hint, bg=CARD, fg=MUTED, font=(FONT, 8), anchor="w", justify="left",
+                                       wraplength=320)
+            self._last_hint.pack(fill="x")
+        if toggle is not None:
+            sw = Toggle(row, toggle)
+            sw.pack(side="right", padx=(12, 0))
+            for w in (row, left, t, *left.winfo_children()):
+                w.bind("<Button-1>", lambda e: sw.flip())
+                w.configure(cursor="hand2")
+        elif control is not None:
+            control(row).pack(side="right", padx=(12, 0))
+        return row
 
-    def _check(self, parent, r, text, var):
-        ttk.Checkbutton(parent, text=text, variable=var).grid(row=r, column=0, columnspan=2, sticky="w")
+    def _spin(self, var, lo, hi, step=1, width=6):
+        return lambda p: ttk.Spinbox(p, from_=lo, to=hi, increment=step, width=width, textvariable=var)
+
+    def _combo(self, var, values, width=8):
+        return lambda p: ttk.Combobox(p, textvariable=var, width=width, state="readonly", values=values)
 
     def _build_general(self, f):
         self.v_key = tk.StringVar(value=self.cfg.equip_key or "1")
@@ -222,65 +374,95 @@ class App:
         self.v_aim = tk.StringVar(value="Perfect" if self.cfg.aim_perfect else "Middle")
         self.v_repeat_n = tk.IntVar(value=self.cfg.max_catches)
         self.v_cursor = tk.BooleanVar(value=self.cfg.move_cursor)
-        self._row(f, 0, "Instrument hotbar slot", ttk.Combobox(f, textvariable=self.v_key, width=5, state="readonly",
-                                                           values=[str(i) for i in range(1, 10)] + ["0"]))
-        self._check(f, 1, "Equip it when starting", self.v_equip)
-        self._check(f, 2, "Count-in: click the head-start rings", self.v_countin)
-        self._row(f, 3, "Cast circle aim", ttk.Combobox(f, textvariable=self.v_aim, width=9, state="readonly",
-                                                     values=["Perfect", "Middle"]))
-        self._row(f, 4, "Stop after (catches)", ttk.Spinbox(f, from_=0, to=9999, width=7, textvariable=self.v_repeat_n),
-                  "0 = keep going until you stop it")
-        self._check(f, 6, "Move the cursor to a safe spot when starting", self.v_cursor)
+        self._setting(f, "Instrument hotbar slot", self._combo(self.v_key, [str(i) for i in range(1, 10)] + ["0"], 4))
+        self._setting(f, "Equip it when starting", toggle=self.v_equip)
+        self._setting(f, "Count-in", hint="Click the head-start rings before each minigame", toggle=self.v_countin)
+        self._setting(f, "Cast circle aim", self._combo(self.v_aim, ["Perfect", "Middle"]))
+        self._setting(f, "Stop after", self._spin(self.v_repeat_n, 0, 9999),
+                      "Catches. 0 = keep going until you stop it")
+        self._setting(f, "Move the cursor to a safe spot", toggle=self.v_cursor)
 
     def _build_timing(self, f):
         self.v_latency = tk.IntVar(value=self.cfg.latency_ms)
         self.v_auto = tk.BooleanVar(value=self.cfg.auto_latency)
-        self.v_cooldown = tk.DoubleVar(value=self.cfg.cooldown_s)
-        self._row(f, 0, "Latency (ms)", ttk.Spinbox(f, from_=0, to=300, increment=5, width=7, textvariable=self.v_latency),
-                  "How early to press, to make up for your PC's delay")
-        self._check(f, 2, "Auto-tune latency from where circle clicks land", self.v_auto)
-        self._row(f, 3, "Wait between catches (s)",
-                  ttk.Spinbox(f, from_=0, to=10, increment=0.5, width=7, textvariable=self.v_cooldown))
         self.v_note_off = tk.IntVar(value=self.cfg.note_offset_ms)
-        self._row(f, 4, "Note timing (ms)",
-                  ttk.Spinbox(f, from_=-150, to=150, increment=5, width=7, textvariable=self.v_note_off),
-                  "Strings/Keys: higher = press later. Getting Good, not Perfect? Try +-10")
+        self.v_auto_note = tk.BooleanVar(value=self.cfg.auto_note_timing)
+        self.v_cooldown = tk.DoubleVar(value=self.cfg.cooldown_s)
+        self._setting(f, "Latency (ms)", self._spin(self.v_latency, 0, 300, 5),
+                      "How early to press, to make up for your PC's delay")
+        self._setting(f, "Auto-tune latency", hint="Learns it from where cast circle clicks land", toggle=self.v_auto)
+        self._setting(f, "Note timing (ms)", self._spin(self.v_note_off, -150, 150, 5),
+                      "Strings/Keys: higher = press later")
+        self._setting(f, "Auto-tune note timing", hint="Learns it from when the strings circles light up",
+                      toggle=self.v_auto_note)
+        self._setting(f, "Wait between catches (s)", self._spin(self.v_cooldown, 0, 10, 0.5))
 
     def _build_discord(self, f):
         self.v_webhook = tk.StringVar(value=self.cfg.webhook_url)
+        self.v_uid = tk.StringVar(value=self.cfg.discord_user_id)
+        self.v_ping = tk.BooleanVar(value=self.cfg.ping_on_stop)
         self.v_notify = tk.BooleanVar(value=self.cfg.notify_catches)
         self.v_report = tk.IntVar(value=self.cfg.report_minutes)
-        tk.Label(f, text="Webhook URL", bg=CARD, fg=TEXT, font=(FONT, 10)).grid(row=0, column=0, columnspan=2, sticky="w")
-        e = ttk.Entry(f, textvariable=self.v_webhook, show="•", width=52)
-        e.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 2))
-        tk.Label(f, text="Discord: channel settings > Integrations > Webhooks. It's only ever sent to Discord.",
-                 bg=CARD, fg=MUTED, font=(FONT, 8)).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        self._check(f, 3, "Post every catch, with a screenshot of the result", self.v_notify)
-        self._row(f, 4, "Session report every (min)", ttk.Spinbox(f, from_=0, to=240, width=7, textvariable=self.v_report),
-                  "0 = off. A final report is also sent when you stop.")
-        bar = tk.Frame(f, bg=CARD)
-        bar.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Button(bar, text="Send test message", style="Ghost.TButton", command=self.test_webhook).pack(side="left")
-        self.l_webhook = tk.Label(bar, text="", bg=CARD, fg=MUTED, font=(FONT, 9))
-        self.l_webhook.pack(side="left", padx=10)
+        row = self._setting(f, "Webhook URL", lambda p: ghost(p, "Send test", self.test_webhook),
+                            self.WEBHOOK_HINT)
+        self.l_webhook = self._last_hint          # the hint line also shows the test result
+        ttk.Entry(row.master, textvariable=self.v_webhook, show="•").pack(fill="x", pady=(0, 8))
+        self._setting(f, "Your Discord user ID", lambda p: ttk.Entry(p, textvariable=self.v_uid, width=21),
+                      "Developer Mode on > right-click your name > Copy User ID")
+        self._setting(f, "Ping me if it stops or gets stuck", toggle=self.v_ping,
+                      hint=f"Roblox closed, errors, goal reached, no catch in {bot.STUCK_MINUTES} min")
+        self._setting(f, "Post every catch", hint="With a screenshot of the result", toggle=self.v_notify)
+        self._setting(f, "Session report every (min)", self._spin(self.v_report, 0, 240), "0 = off")
+
+    WEBHOOK_HINT = "Channel settings > Integrations > Webhooks > Copy URL"
 
     def _build_more(self, f):
-        self.b_hotkey = ttk.Button(f, text=f"Start/Stop key: {self.hotkey.upper()}", style="Ghost.TButton",
-                                   command=self.hotkey_dialog)
-        btns = [(self.b_hotkey, None),
-                (ttk.Button(f, text="Test detection (no clicks)", style="Ghost.TButton",
-                            command=lambda: self.start(dry=True)), None),
-                (ttk.Button(f, text="Show log", style="Ghost.TButton", command=self.show_log), None),
-                (ttk.Button(f, text="Make bug report", style="Ghost.TButton", command=self.bug_report), None),
-                (ttk.Button(f, text="Check for updates", style="Ghost.TButton", command=self.check_update_now), None),
-                (ttk.Button(f, text="Source code on GitHub", style="Ghost.TButton",
-                            command=lambda: webbrowser.open(REPO_URL)), None)]
-        for i, (b, _) in enumerate(btns):
-            b.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0 if i % 2 == 0 else 6, 0), pady=4)
-        f.columnconfigure(0, weight=1, uniform="m")
-        f.columnconfigure(1, weight=1, uniform="m")
-        self.l_update = tk.Label(f, text="", bg=CARD, fg=MUTED, font=(FONT, 9))
-        self.l_update.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        grid = tk.Frame(f, bg=CARD)
+        grid.pack(fill="x", pady=(6, 0))
+        self.b_hotkey = ghost(grid, f"Start/Stop key: {self.hotkey.upper()}", self.hotkey_dialog)
+        btns = [self.b_hotkey,
+                ghost(grid, "Test detection (no clicks)", lambda: self.start(dry=True)),
+                ghost(grid, "Show log", self.show_log),
+                ghost(grid, "Make bug report", self.bug_report),
+                ghost(grid, "Check for updates", self.check_update_now),
+                ghost(grid, "Source code on GitHub", lambda: webbrowser.open(REPO_URL))]
+        for i, b in enumerate(btns):
+            b.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0 if i % 2 == 0 else 6, 0), pady=3)
+        grid.columnconfigure(0, weight=1, uniform="m")
+        grid.columnconfigure(1, weight=1, uniform="m")
+        self.l_update = tk.Label(f, text="", bg=CARD, fg=MUTED, font=(FONT, 9), anchor="w")
+        self.l_update.pack(fill="x", pady=(8, 0))
+        tk.Label(f, text="Tip: the pin (top right) keeps this window on top, the arrow shrinks it.",
+                 bg=CARD, fg=DIM, font=(FONT, 8), anchor="w").pack(fill="x", pady=(2, 6))
+
+    def _tab_changed(self, title):
+        self.ui["tab"] = title
+
+    # ------------------------------------------------------- pin / mini
+    def set_pin(self, on):
+        self.ui["pin_on_top"] = bool(on)
+        self.root.attributes("-topmost", bool(on))
+        self.b_pin.set(IC_PINNED if on else IC_PIN, bool(on))
+
+    def toggle_pin(self):
+        self.set_pin(not self.ui["pin_on_top"])
+        self.read_cfg(quiet=True)
+
+    def set_compact(self, on):
+        self.ui["compact"] = bool(on)
+        if on:
+            self.graph.pack_forget()
+            self.tabs.pack_forget()
+            self.b_start.pack_configure(pady=(12, 0))
+        else:
+            self.graph.pack(fill="x", pady=(10, 0))
+            self.b_start.pack_configure(pady=(12, 12))
+            self.tabs.pack(fill="both", expand=True)
+        self.b_compact.set(IC_DOWN if on else IC_UP, False)
+
+    def toggle_compact(self):
+        self.set_compact(not self.ui["compact"])
+        self.read_cfg(quiet=True)
 
     # ------------------------------------------------------------ config
     def read_cfg(self, quiet=False):
@@ -296,14 +478,18 @@ class App:
                 messagebox.showerror(APP, "Please enter numbers in the number boxes.")
             return None
         c.auto_latency = self.v_auto.get()
+        c.auto_note_timing = self.v_auto_note.get()
         c.equip_key = self.v_key.get()
         c.equip_on_start = self.v_equip.get()
         c.count_in = self.v_countin.get()
         c.aim_perfect = self.v_aim.get() == "Perfect"
         c.move_cursor = self.v_cursor.get()
         c.webhook_url = self.v_webhook.get().strip()
+        c.discord_user_id = self.v_uid.get().strip()
+        c.ping_on_stop = self.v_ping.get()
         c.notify_catches = self.v_notify.get()
-        save_settings(c, self.hotkey)
+        self.ui["hotkey"] = self.hotkey
+        save_settings(c, self.ui)
         return c
 
     # ----------------------------------------------------------- running
@@ -318,6 +504,9 @@ class App:
             return
         if cfg.webhook_url and not notify.valid_url(cfg.webhook_url):
             messagebox.showwarning(APP, "The Discord webhook URL doesn't look right - Discord posts are off until it's fixed.")
+        elif cfg.webhook_url and cfg.discord_user_id and not notify.valid_user_id(cfg.discord_user_id):
+            messagebox.showwarning(APP, "Your Discord user ID doesn't look right (it's a long number) - "
+                                        "pings are off until it's fixed.")
         cfg.dry_run = dry
         self.status = bot.Status(log_path=os.path.join(BASE, "macro_log.txt"), debug_dir=os.path.join(BASE, "debug"))
         try:
@@ -375,7 +564,9 @@ class App:
         phase = st.phase if (running or st.phase in ("Error",)) else "Stopped"
         self.l_phase.config(text=phase)
         self.dot.itemconfigure(self.dot_id, fill=PHASE_COLORS.get(phase, GOOD))
-        self.l_detail.config(text=(st.detail or ("Press Start or your hotkey while Roblox is open" if not running else ""))[:80])
+        idle = f"Open Roblox, then press Start or {self.hotkey.upper()}"
+        self.l_detail.config(text=(st.detail or (idle if not running else ""))[:80],
+                             fg=WARN if phase == "Stopped" and st.detail else MUTED)
         self.l_fps.config(text=f"{st.fps:.0f} fps" if running and st.fps else "")
         up = time.time() - st.session_start if st.session_start else 0
         self.tiles["finished"].config(text=str(st.finished))
@@ -383,14 +574,17 @@ class App:
         self.tiles["rate"].config(text=f"{st.finished / (up / 3600):.0f}" if up > 60 else "-")
         self.tiles["uptime"].config(text=notify.fmt_duration(up) if st.session_start else "-")
         if running and self.bot is not None:
-            try:   # show the latency the bot has learned so far
+            try:   # show the timing the bot has learned so far
                 if int(self.v_latency.get()) != self.bot.cfg.latency_ms:
                     self.v_latency.set(self.bot.cfg.latency_ms)
+                if int(self.v_note_off.get()) != self.bot.cfg.note_offset_ms:
+                    self.v_note_off.set(self.bot.cfg.note_offset_ms)
             except (tk.TclError, ValueError):
                 pass
         if not running and self.b_start.base == BAD:
             self.update_start_button(False)
-        self.draw_graph(st.graph if running else {})
+        if not self.ui["compact"]:
+            self.draw_graph(st.graph if running else {})
         if self.log_win is not None and self.log_win.winfo_exists():
             lines = list(st.log)
             if lines != self._log_shown:
@@ -406,15 +600,16 @@ class App:
     def draw_graph(self, g):
         c = self.graph
         c.delete("all")
-        W = int(c.winfo_width()) if c.winfo_width() > 1 else 470
-        H = 150
+        W = int(c.winfo_width()) if c.winfo_width() > 1 else 460
+        H = int(c.winfo_height()) if c.winfo_height() > 1 else 140
         mode = g.get("mode")
         age = time.perf_counter() - g["now"] if g.get("now") else 0.0
         if not mode:
-            for x in range(0, W, 40):
-                c.create_line(x, 0, x, H, fill="#262a34")
+            for x in range(20, W, 40):
+                for y in range(20, H, 40):
+                    c.create_oval(x - 1, y - 1, x + 1, y + 1, fill="#2b303b", outline="")
             c.create_text(W / 2, H / 2, text="Live minigame view" if self.running() else "Not running",
-                          fill=MUTED, font=(FONT, 10))
+                          fill=DIM, font=(FONT, 10))
             return
         if mode == "lanes":
             self._draw_lanes(c, g, W, H, age)
@@ -457,7 +652,7 @@ class App:
                     c.create_line(x, y - 7, x, y + 7, fill=col, width=3)
 
     def _draw_ring(self, c, g, W, H, age):
-        cx, cy, r = W / 2, H / 2 + 6, 52
+        cx, cy, r = W / 2, H / 2 + 6, min(52, H / 2 - 16)
         c.create_text(10, 11, text="Cast circle", anchor="w", fill=MUTED, font=(FONT, 8))
         c.create_oval(cx - r, cy - r, cx + r, cy + r, outline="#2f3440", width=10)
         tgt = g.get("target", 0.0)
@@ -506,15 +701,22 @@ class App:
     # ---------------------------------------------------------- discord
     def test_webhook(self):
         url = self.v_webhook.get().strip()
+        uid = self.v_uid.get().strip()
         if not notify.valid_url(url):
             self.l_webhook.config(text="That isn't a Discord webhook URL", fg=BAD)
             return
+        if uid and not notify.valid_user_id(uid):
+            self.l_webhook.config(text="The user ID should be a long number", fg=BAD)
+            return
+        ping = uid if uid and self.v_ping.get() else None
         self.l_webhook.config(text="Sending...", fg=MUTED)
-        embed = {"title": "Scroom Macro is connected", "description": "Catch alerts and session reports will show up here.",
+        embed = {"title": "Scroom Macro is connected",
+                 "description": "Catch alerts and session reports will show up here."
+                                + (" You'll get pinged like this if the macro stops or gets stuck." if ping else ""),
                  "color": notify.COLOR}
-        notify.send_async(url, embed, on_done=lambda ok, msg: self.root.after(
-            0, lambda: self.l_webhook.config(text="Sent! Check your channel" if ok else f"Failed: {msg}"[:60],
-                                             fg=GOOD if ok else BAD)))
+        notify.send_async(url, embed, ping=ping, on_done=lambda ok, msg: self.root.after(
+            0, lambda: self.l_webhook.config(text=("Sent! Check your channel" + (" (and your ping)" if ping else ""))
+                                             if ok else f"Failed: {msg}"[:60], fg=GOOD if ok else BAD)))
 
     # ---------------------------------------------------------- updates
     def _check_update(self, manual=False):
@@ -524,7 +726,7 @@ class App:
     def _show_update(self, newer, url, manual):
         if newer:
             self.update_info = (newer, url)
-            self.update_pill.config(text=f"Update v{newer} available  >", bg=BG)
+            self.update_pill.config(text=f"Update v{newer}  →")
             self.l_update.config(text=f"v{newer} is out - click the green text at the top to download it.", fg=GOOD)
         elif manual:
             self.l_update.config(text=f"You're on the latest version (v{VERSION}).", fg=MUTED)
@@ -573,7 +775,7 @@ class App:
             self.update_start_button()
             self.b_hotkey.config(text=f"Start/Stop key: {self.hotkey.upper()}")
             self.apply_hotkey()
-            save_settings(self.cfg, self.hotkey)
+            self.read_cfg(quiet=True)
             win.destroy()
 
         ttk.Button(win, text="Save", style="Ghost.TButton", command=ok).grid(row=2, column=0, sticky="ew", padx=(0, 4))
@@ -598,10 +800,11 @@ class App:
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("version.txt", f"{APP} v{VERSION}\n")
                 for f in files:
-                    if f.endswith("settings.json"):      # never share the webhook URL
+                    if f.endswith("settings.json"):      # never share the webhook URL or your Discord ID
                         try:
                             data = json.load(open(f))
-                            data["webhook_url"] = "(removed)" if data.get("webhook_url") else ""
+                            for k in ("webhook_url", "discord_user_id"):
+                                data[k] = "(removed)" if data.get(k) else ""
                             z.writestr("settings.json", json.dumps(data, indent=2))
                         except (OSError, ValueError):
                             pass
@@ -620,6 +823,7 @@ class App:
             return
         self.log_win = tk.Toplevel(self.root, bg=BG)
         self.log_win.title(f"{APP} - log")
+        self.log_win.transient(self.root)
         self._log_text = tk.Text(self.log_win, width=80, height=22, font=("Consolas", 9), state="disabled",
                                  bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat", padx=10, pady=8)
         self._log_text.pack(fill="both", expand=True)

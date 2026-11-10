@@ -197,6 +197,34 @@ def next_notes(img, ox, oy, hw, masks=None):
     return notes, holds, bar_near
 
 
+def hit_marks(img, ox, oy, hw, masks):
+    """For note timing: per lane (y of the white core of the note at the
+    circle, or None; how much of the circle's middle is lit, 0..1). The core
+    crossing the circle's center vs the circle lighting up (the game took the
+    key) says how early or late a press was."""
+    r = hw.r
+    y0 = max(0, int(hw.cy - 2.5 * r - oy))
+    y1 = max(0, int(hw.cy + 1.15 * r - oy))
+    out = {}
+    for i, lane in enumerate(LANES):
+        x = hw.cx[i] - ox
+        sub = img[y0:y1, max(0, int(x - 0.9 * r)):max(0, int(x + 0.9 * r))]
+        wy = None
+        if sub.size:
+            rows = (sub.min(axis=2) > 225).sum(axis=1) >= 2
+            ys = np.flatnonzero(rows)
+            if ys.size:
+                bot = top = ys[-1]               # the lowest white blob
+                while top - 1 >= 0 and rows[top - 1]:
+                    top -= 1
+                if bot - top < 0.6 * r:          # a note's core, not a long bar
+                    wy = y0 + (top + bot) / 2 + oy
+        m = masks[lane][max(0, int(hw.cy - 0.5 * r - oy)):max(0, int(hw.cy + 0.5 * r - oy)),
+                        max(0, int(x - 0.5 * r)):max(0, int(x + 0.5 * r))]
+        out[lane] = (wy, float(m.mean()) if m.size else 0.0)
+    return out
+
+
 def _rim(mask, cx, cy, r, n=48):
     """Fraction of a circle's outline (+-2 px) that is lit in mask."""
     H, W = mask.shape
@@ -224,6 +252,7 @@ class StringsFinder:
         self.misses = 0
         self.holds = {}         # lane -> the next note is a hold note
         self.bar_near = {}      # lane -> hold bar coverage just above the circle
+        self.marks = {}         # lane -> (note core y, circle lit 0..1), for note timing
 
     def region(self, w, h):
         if self.hw:
@@ -245,6 +274,7 @@ class StringsFinder:
                 hw = old
         if hw is None:
             hw = find_highway(img, ox, oy, h)
+        seen = 3
         if hw is None:
             self.misses += 1
             # the highway doesn't move; a note sliding into a circle (or a long
@@ -263,4 +293,10 @@ class StringsFinder:
             self.misses = 0
             self.hw = hw
         notes, self.holds, self.bar_near = next_notes(img, ox, oy, hw, masks)
+        if seen < 2:
+            # the highway is (nearly) gone - the minigame is closing: whatever
+            # lane-colored thing is left on screen isn't a note
+            notes = {k: None for k in LANES}
+            self.holds = {k: False for k in LANES}
+        self.marks = hit_marks(img, ox, oy, hw, masks)
         return hw, notes
