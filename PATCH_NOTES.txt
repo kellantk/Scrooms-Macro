@@ -8,6 +8,8 @@ v2.0.1
 - Fixed: starting the macro shrank a maximized/fullscreen Roblox window.
 - Added: minigame keybinds setting (General tab) for players who changed
   their strings/keys buttons in the game.
+- Fixed: on small screens the app ran under the taskbar - the settings now
+  scroll and the window stays on screen.
 
 v2.0
 ----

@@ -53,6 +53,19 @@ PHASE_COLORS = {"Stopped": MUTED, "Paused": WARN, "Error": BAD, "Cooldown": MUTE
 UI_KEYS = {"hotkey": "f6", "pin_on_top": False, "compact": False, "tab": "General"}
 
 
+def work_area():
+    """The screen's usable area (without the taskbar): left, top, right, bottom."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        r = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0):   # SPI_GETWORKAREA
+            return r.left, r.top, r.right, r.bottom
+    except Exception:
+        pass
+    return 0, 0, 1920, 1040
+
+
 def load_settings():
     cfg, ui = bot.Config(), dict(UI_KEYS)
     try:
@@ -92,6 +105,9 @@ def setup_style(root):
         s.map(w, fieldbackground=[("readonly", FIELD)], foreground=[("readonly", TEXT)],
               bordercolor=[("focus", ACCENT)], lightcolor=[("focus", ACCENT)], darkcolor=[("focus", ACCENT)],
               arrowcolor=[("active", TEXT)])
+    s.configure("Dark.Vertical.TScrollbar", background=BORDER, troughcolor=CARD, bordercolor=CARD,
+                lightcolor=BORDER, darkcolor=BORDER, arrowcolor=MUTED, gripcount=0)
+    s.map("Dark.Vertical.TScrollbar", background=[("active", HOVER)])
     s.configure("Ghost.TButton", background=FIELD, foreground=TEXT, borderwidth=0, padding=(10, 6), font=(FONT, 9))
     s.map("Ghost.TButton", background=[("active", HOVER), ("pressed", HOVER)])
     root.option_add("*TCombobox*Listbox.background", FIELD)
@@ -203,13 +219,45 @@ class Tabs(tk.Frame):
         super().__init__(master, bg=BG)
         self.bar = tk.Frame(self, bg=BG)
         self.bar.pack(fill="x")
-        self.body = tk.Frame(self, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
-        self.body.pack(fill="both", expand=True)
+        # the pages sit in a canvas so they can scroll when the screen is too
+        # short to show everything (small laptops: it ran under the taskbar)
+        self.wrap = tk.Frame(self, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
+        self.wrap.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(self.wrap, bg=CARD, highlightthickness=0, bd=0)
+        self.sb = ttk.Scrollbar(self.wrap, orient="vertical", command=self.canvas.yview, style="Dark.Vertical.TScrollbar")
+        self.canvas.configure(yscrollcommand=self.sb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.body = tk.Frame(self.canvas, bg=CARD)
+        self.win = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
         self.body.grid_rowconfigure(0, weight=1)
         self.body.grid_columnconfigure(0, weight=1)
+        self.max_h = None
+        self.body.bind("<Configure>", lambda e: self._sync())
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.win, width=e.width))
+        self.wrap.bind("<Enter>", lambda e: self.wrap.bind_all("<MouseWheel>", self._wheel))
+        self.wrap.bind("<Leave>", lambda e: self.wrap.unbind_all("<MouseWheel>"))
         self.pages, self.heads = {}, {}
         self.current = None
         self.on_change = on_change
+
+    def _sync(self):
+        w, h = self.body.winfo_reqwidth(), self.body.winfo_reqheight()
+        shown = h if self.max_h is None else min(h, self.max_h)
+        self.canvas.configure(width=w, height=shown, scrollregion=(0, 0, w, h))
+        if shown < h:
+            if not self.sb.winfo_ismapped():
+                self.sb.pack(side="right", fill="y")
+        elif self.sb.winfo_ismapped():
+            self.sb.pack_forget()
+            self.canvas.yview_moveto(0)
+
+    def set_max_height(self, h):
+        self.max_h = h
+        self._sync()
+
+    def _wheel(self, e):
+        if self.sb.winfo_ismapped():
+            self.canvas.yview_scroll(int(-e.delta / 120) * 3, "units")
 
     def add(self, title):
         page = tk.Frame(self.body, bg=CARD, padx=16, pady=6)
@@ -237,6 +285,7 @@ class Tabs(tk.Frame):
             lbl.configure(fg=TEXT if t == title else MUTED)
             line.configure(bg=ACCENT if t == title else BG)
         self.pages[title].tkraise()
+        self.canvas.yview_moveto(0)
         if self.on_change:
             self.on_change(title)
 
@@ -330,6 +379,7 @@ class App:
         self.apply_hotkey()
         self.set_pin(self.ui["pin_on_top"])
         self.set_compact(self.ui["compact"])
+        self.fit_screen(place=True)
         root.protocol("WM_DELETE_WINDOW", self.quit)
         threading.Thread(target=self._check_update, daemon=True).start()
         self.poll()
@@ -470,6 +520,35 @@ class App:
             self.b_start.pack_configure(pady=(12, 12))
             self.tabs.pack(fill="both", expand=True)
         self.b_compact.set(IC_DOWN if on else IC_UP, False)
+        if hasattr(self, "graph") and self.root.winfo_ismapped():
+            self.fit_screen(place=True)
+
+    def fit_screen(self, place=False):
+        """Keep the whole window above the taskbar: on short screens the
+        settings get a scrollbar instead of running off the bottom."""
+        left, top, right, bottom = work_area()
+        root = self.root
+        self.tabs.set_max_height(None)
+        self.graph.configure(height=118)
+        root.update_idletasks()
+        avail = bottom - top - 45                  # the title bar + a little room
+        over = root.winfo_reqheight() - avail
+        if over > 0 and not self.ui["compact"]:
+            # settings scroll first, then the live view gets shorter
+            body = self.tabs.body.winfo_reqheight()
+            cut = min(over, body - 140)
+            self.tabs.set_max_height(body - max(cut, 0))
+            over -= max(cut, 0)
+            if over > 0:
+                self.graph.configure(height=max(60, 118 - over))
+            root.update_idletasks()
+        if place:
+            h = root.winfo_reqheight() + 40
+            y = root.winfo_y() if root.winfo_ismapped() else (top + max(0, (bottom - top - h) // 3))
+            if y + h > bottom or y < top:
+                y = max(top, bottom - h)
+            x = root.winfo_x() if root.winfo_ismapped() else max(left, (right - left - root.winfo_reqwidth()) // 2)
+            root.geometry(f"+{x}+{y}")
 
     def toggle_compact(self):
         self.set_compact(not self.ui["compact"])
