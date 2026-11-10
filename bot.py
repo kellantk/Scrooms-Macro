@@ -27,6 +27,7 @@ import notify
 import keys
 import percussion
 import strings
+import wind
 
 
 @dataclass
@@ -319,6 +320,7 @@ class Bot:
         self.strings_finder = strings.StringsFinder()
         self.perc_finder = percussion.PercussionFinder()
         self.keys_finder = keys.KeysFinder()
+        self.wind_finder = wind.WindFinder()
         self.countin_finder = countin.CountInFinder()
 
     # ------------------------------------------------------------ helpers
@@ -506,9 +508,12 @@ class Bot:
     def keys(self):
         return self.look(self.keys_finder)
 
+    def wind(self):
+        return self.look(self.wind_finder)
+
     def minigame_up(self):
         """Is any catch minigame on screen already?"""
-        return bool(self.strings() or self.keys() or self.freq() or self.perc())
+        return bool(self.strings() or self.keys() or self.freq() or self.perc() or self.wind())
 
     def reel(self):
         r = self.look(self.reel_finder)
@@ -593,6 +598,9 @@ class Bot:
         if self.perc():
             self.do_perc()
             return
+        if self.wind():
+            self.do_wind()
+            return
         if self.reel():
             self.do_reel()
             return
@@ -629,6 +637,9 @@ class Bot:
                 return
             if self.perc():
                 self.do_perc()
+                return
+            if self.wind():
+                self.do_wind()
                 return
             if self.reel():
                 self.do_reel()
@@ -1034,6 +1045,201 @@ class Bot:
         if presses:
             self.minigame_done(name, f"{presses} notes hit")
 
+    # -------------------------------------------------------------- wind
+    def do_wind(self):
+        """Wind: a 5-line staff. Steer the scroom onto the next note's line by
+        moving the mouse up/down, and hold left click while that note's bar
+        slides past the scroom. All notes move left at the same speed, so each
+        one is turned into a time window (head arrives .. tail passes)."""
+        self.set_phase("Wind", "notes coming")
+        self.log("Wind minigame")
+        lead = self.cfg.latency_ms / 1000
+        sched = []                      # [line, on, off, on_seen, off_seen, id]
+        next_id = 0
+        speeds = deque(maxlen=20)       # px/s samples
+        past = deque()                  # (t, readings) of the last ~0.1 s
+        ref_st = cand = None            # staff: where it settled / where it's going
+        early_for = None                # note we already left early for the next one
+        moved_since = 0.0
+        speed = None                    # note speed as a fraction of the staff per second
+        learned = {}                    # line -> cursor y that put the scroom on it
+        nudges = 0
+        cur_line = None
+        moving = None                   # (time the cursor moved, line) until the scroom gets there
+        move_times = deque(maxlen=9)
+        ys = deque()                    # scroom readings of the last 0.15 s (t, y)
+        cur = None                      # cursor y we sent, and when
+        cur_t = 0.0
+        line = None
+        held_id = None
+        played = 0
+        warned = False
+        gone_since = None
+        try:
+            while not self.stopped():
+                self.wait_focus()
+                now = self.io.now()
+                res = self.wind()
+                if res is None:
+                    gone_since = gone_since or now
+                    if self.held:
+                        self.hold(False)
+                        held_id = None
+                    if now - gone_since > 2.5:       # rides out the tutorial screen
+                        break
+                    self.io.sleep(0.005)
+                    continue
+                gone_since = None
+                st, sy, reads = res
+                L, sx = st.L, st.sx
+                right = st.x0 + 0.985 * L
+                # the staff never moves while notes come: if it's somewhere else
+                # than where it settled, it's opening/closing - don't act on it
+                # (unless it stays there: the window was resized)
+                def moved(a, b, f):
+                    return abs(a.L - b.L) > f * b.L or abs(a.top - b.top) > f * b.L or abs(a.x0 - b.x0) > f * b.L
+                if ref_st is None or moved(st, ref_st, 0.03):
+                    if cand is None or moved(st, cand, 0.01):
+                        cand, moved_since = st, now     # still changing
+                    if now - moved_since < 0.4:
+                        sched, past = [], deque()
+                        if self.held:
+                            self.hold(False)
+                            held_id = None
+                        continue
+                    ref_st = st                         # it has settled here
+                cand = None
+                # ---- note speed: ends that are really visible, vs a read ~0.1 s ago
+                # (we read faster than the game draws: back-to-back reads are
+                # often the same frame)
+                past.append((now, reads))
+                while len(past) > 2 and now - past[1][0] >= 0.1:
+                    past.popleft()
+                if now - past[0][0] >= 0.1:
+                    dt = now - past[0][0]
+                    for n in reads:
+                        for k in ("head", "tail"):
+                            a = getattr(n, k)
+                            if not sx + 0.07 * L < a < right:
+                                continue
+                            shifts = [getattr(p, k) - a for p in past[0][1] if p.line == n.line
+                                      and sx + 0.07 * L < getattr(p, k) < right]
+                            shifts = [d for d in shifts if 0.15 * L * dt < d < 1.2 * L * dt]
+                            if shifts:
+                                speeds.append(min(shifts) / dt)
+                v = float(np.median(speeds)) if len(speeds) >= 3 else 0.43 * L
+                # ---- turn readings into time windows
+                for n in reads:
+                    lo, hi = now + (n.head - sx) / v, now + (n.tail - sx) / v
+                    on = lo if sx + 0.07 * L < n.head < right else None
+                    off = hi if sx + 0.07 * L < n.tail < right else None
+                    m = next((s for s in sched if s[0] == n.line and lo < s[2] + 0.1 and hi > s[1] - 0.1), None)
+                    if m is None:
+                        sched.append([n.line, lo, hi, on is not None, off is not None, next_id])
+                        next_id += 1
+                        continue
+                    if on is not None:
+                        m[1] = on if not m[3] else 0.6 * m[1] + 0.4 * on
+                        m[3] = True
+                    elif not m[3]:
+                        m[1] = min(m[1], lo)
+                    if off is not None:
+                        m[2] = off if not m[4] else 0.6 * m[2] + 0.4 * off
+                        m[4] = True
+                    elif not m[4]:
+                        m[2] = max(m[2], hi)          # the bar is still coming in
+                sched = sorted((s for s in sched if s[2] > now - 0.3), key=lambda s: s[1])
+                # ---- what to do now (judged `lead` ahead: the game sees it later)
+                t = now + lead
+                active = next((s for s in sched if s[1] <= t < s[2]), None)
+                nxt = next((s for s in sched if s[1] > t), None)
+                if active is not None:
+                    line = active[0]
+                    # the next note starts right after this one on another line:
+                    # start moving over just before this one ends (and stick to it)
+                    early = float(np.clip(0.5 * np.median(move_times), 0.04, 0.2)) if move_times else 0.08
+                    if nxt is not None and nxt[0] != line and (
+                            early_for == active[5] or (nxt[1] - active[2] < 0.3 and t > active[2] - early)):
+                        line = nxt[0]
+                        early_for = active[5]
+                elif nxt is not None:
+                    line = nxt[0]
+                # ---- steer: cursor y -> scroom y, learned from where it settles
+                if sy is not None:
+                    ys.append((now, sy))
+                while ys and now - ys[0][0] > 0.15:
+                    ys.popleft()
+                if line is not None:
+                    want = st.lines[line]
+                    # cursor y for this line: what worked before, else a guess from
+                    # the lines learned so far (the scroom should just follow the
+                    # cursor's height, but that's checked, not assumed)
+                    known = sorted(learned.items())
+                    if line in learned:
+                        y_cur = learned[line]
+                    elif len(known) >= 2:
+                        k, c = np.polyfit([st.lines[i] for i, _ in known], [c for _, c in known], 1)
+                        y_cur = k * want + c
+                    elif known:
+                        y_cur = want + known[0][1] - st.lines[known[0][0]]
+                    else:
+                        y_cur = want
+                    y_cur = float(np.clip(y_cur, 2, self.io.client_size()[1] - 3))
+                    if cur is None or abs(y_cur - cur) >= 1:
+                        if not self.cfg.dry_run:
+                            self.io.move_to(min(st.x0 + 1.06 * L, self.io.client_size()[0] - 5), y_cur)
+                        if cur_line is not None and line != cur_line:
+                            moving = (now, line)        # time how long the scroom takes to get there
+                        cur, cur_t, cur_line = y_cur, now, line
+                    if moving is not None and sy is not None:
+                        if moving[1] != line or now - moving[0] > 1.0:
+                            moving = None
+                        elif abs(sy - st.lines[moving[1]]) < 0.15 * st.spacing:
+                            move_times.append(now - moving[0])
+                            moving = None
+                    # settled (cursor still for a bit, scroom not moving)? check it
+                    # sits on the line; if not, nudge the cursor and remember
+                    if (cur_line == line and now - cur_t > 0.25 and len(ys) >= 3 and ys[-1][0] - ys[0][0] > 0.08
+                            and np.ptp([y for _, y in ys]) < 0.015 * st.D):
+                        err = want - ys[-1][1]
+                        if abs(err) <= 0.06 * st.spacing:
+                            learned[line] = cur
+                        else:
+                            slope = 1.0      # cursor px per scroom px
+                            if len(known) >= 2:
+                                k = np.polyfit([st.lines[i] for i, _ in known], [c for _, c in known], 1)[0]
+                                slope = float(np.clip(k, 0.3, 6))
+                            learned[line] = float(np.clip(cur + slope * err, 2, self.io.client_size()[1] - 3))
+                            nudges += 1
+                            if nudges == 6:
+                                self.log("Wind: the scroom doesn't sit where the mouse is - correcting")
+                            if nudges == 30 and not warned:
+                                warned = True
+                                self.log("Wind: the scroom doesn't follow the mouse")
+                                self.snapshot("wind-no-steer")
+                # ---- hold while a note's bar is at the scroom
+                want_hold = active is not None
+                if want_hold and held_id is not None and active[5] != held_id and self.held:
+                    self.hold(False)            # a new note right after the last one: press again
+                    self.io.sleep(0.03)
+                if want_hold and not self.held:
+                    self.hold(True)
+                    played += 1
+                    speed = v / L
+                    self.set_phase("Wind", f"holding line {active[0] + 1}  ({played} notes)")
+                elif not want_hold and self.held:
+                    self.hold(False)
+                held_id = active[5] if want_hold else None
+                sline = None if sy is None else (sy - st.top) / st.D
+                self.st.graph = {"mode": "staff", "now": now, "scroom": sline, "hold": want_hold,
+                                 "notes": [(s[0], s[1] - now, s[2] - now) for s in sched], "target": line}
+        finally:
+            self.hold(False)
+        self.log(f"Wind minigame finished ({played} notes played"
+                 + (f", notes moved {speed:.2f} staff/s)" if speed else ")"))
+        if played:
+            self.minigame_done("Wind", f"{played} notes played")
+
     # -------------------------------------------------------- percussion
     def do_perc(self):
         """One lane, notes slide left to the scroom: white = left click, blue =
@@ -1349,6 +1555,7 @@ class _INPUT(ctypes.Structure):
 
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
 MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
+MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
 KEYEVENTF_SCANCODE, KEYEVENTF_KEYUP = 0x0008, 0x0002
 SCANCODES = {"1": 0x02, "2": 0x03, "3": 0x04, "4": 0x05, "5": 0x06,
              "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B,
@@ -1510,6 +1717,17 @@ class WindowsIO:
     def mouse_down(self):
         _send(_INPUT(0, _INPUTUNION(mi=_MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, 0))))
 
+
+    def move_to(self, x, y):
+        """Move the cursor to (x, y) in the game window - sent as a real mouse
+        move (wind: the scroom follows the mouse up and down)."""
+        cx, cy, _, _ = self.client_rect()
+        vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)      # virtual screen
+        vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+        nx = int(round((cx + x - vx) * 65535 / max(1, vw - 1)))
+        ny = int(round((cy + y - vy) * 65535 / max(1, vh - 1)))
+        _send(_INPUT(0, _INPUTUNION(mi=_MOUSEINPUT(nx, ny, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
+                                                   | MOUSEEVENTF_VIRTUALDESK, 0, 0))))
 
     def button_down(self, btn):
         flag = MOUSEEVENTF_RIGHTDOWN if btn == "right" else MOUSEEVENTF_LEFTDOWN

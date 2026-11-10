@@ -8,6 +8,8 @@ v2.0
   as the macro plays them.
 - Count-in support: the macro now clicks the head-start rings before every
   minigame.
+- Wind instruments: the macro steers the scroom onto each note's line with
+  the mouse and holds left click through the note.
 - Discord alerts: paste a webhook in the Discord tab to get every catch posted
   with a screenshot, plus a session report every few minutes.
 - Update alerts: the app tells you when a new version is out.

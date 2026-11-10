@@ -619,6 +619,34 @@ class App:
             self._draw_countin(c, g, W, H)
         elif mode == "series":
             self._draw_series(c, g, W, H)
+        elif mode == "staff":
+            self._draw_staff(c, g, W, H, age)
+
+    def _draw_staff(self, c, g, W, H, age):
+        top, bot_ = 24, H - 8
+        gap = (bot_ - top) / 5
+        ys = [top + gap * (i + 0.5) for i in range(5)]
+        left, hitx = 30, 64
+        scale = (W - hitx - 10) / 2.0          # px per second of "time until it arrives"
+        c.create_text(10, 11, text="Wind  -  notes coming in", anchor="w", fill=MUTED, font=(FONT, 8))
+        for y in ys:
+            c.create_line(left, y, W - 8, y, fill="#2b303a")
+        c.create_line(hitx, top - 4, hitx, bot_, fill=ACCENT, width=2)
+        for ln, on, off in g.get("notes", []):
+            if not 0 <= ln < 5:
+                continue
+            xa, xb = max(left, hitx + (on - age) * scale), min(W - 8, hitx + (off - age) * scale)
+            if xb > xa:
+                c.create_line(xa, ys[ln], xb, ys[ln], fill="#a7f3d0", width=5, capstyle="round")
+        tgt = g.get("target")
+        if tgt is not None and 0 <= tgt < 5:
+            c.create_text(14, ys[tgt], text="▸", fill=ACCENT_HI, font=(FONT, 9))
+        s = g.get("scroom")
+        if s is not None:
+            y = ys[0] + (s - 0.142) / 0.179 * gap
+            d = 8
+            c.create_polygon(hitx, y - d, hitx + d, y, hitx, y + d, hitx - d, y,
+                             fill=ACCENT if g.get("hold") else FIELD, outline="white", width=2)
 
     def _draw_lanes(self, c, g, W, H, age):
         lanes = g.get("lanes", [])

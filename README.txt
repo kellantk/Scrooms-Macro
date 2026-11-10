@@ -19,7 +19,9 @@ USE
   tutorial yourself - the macro waits for it.
 
 SUPPORTED INSTRUMENTS (Crescendo Valley update)
-  Strings, Keys, Percussion: yes.   Wind: not yet.
+  Strings, Keys, Percussion, Wind: all supported.
+  Wind: the macro moves your mouse up and down to steer the scroom -
+  don't touch the mouse while it plays.
 
 WINDOW
   Pin (top right)    keeps the app on top of the game.

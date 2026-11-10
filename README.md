@@ -34,13 +34,14 @@ the zip it creates.
 | `startup_check.py` | Checks the app's files on startup and shows a clear error if something's missing |
 | `make_version.py`, `build_exe.bat` | Build the `.exe` and release zip |
 
-**Supported instruments (Crescendo Valley update):** Strings, Keys, Percussion. Wind: not yet.
+**Supported instruments (Crescendo Valley update):** Strings, Keys, Percussion, Wind.
 
 | File | Minigame |
 |---|---|
 | `strings.py` | Strings: 3-lane note highway, keys A/S/D |
 | `keys.py` | Keys: Piano-Tiles board, keys A/S/D/F |
 | `percussion.py` | Percussion: one lane, left/right/both clicks |
+| `wind.py` | Wind: 5-line staff - steer the scroom with the mouse, hold left click through each note |
 | `countin.py` | The count-in: clicks each head-start ring as it reaches the circle |
 | `notify.py` | Discord webhook: catch alerts with a screenshot, session reports |
 | `updater.py` | Checks this repo's Releases for a newer version (only opens the page - never installs anything) |
@@ -49,6 +50,9 @@ the zip it creates.
 - **Ring:** finds the ring by its green zone, measures the needle's speed and direction, and
   clicks on the calculated position. After each click it reads where the needle froze and
   learns your PC's delay (*auto-tune latency*).
+- **Wind:** turns every note on the staff into a time window from its bar's ends and the measured
+  scroll speed, moves the mouse so the scroom sits on the next note's line (learning how the
+  scroom follows the cursor), and holds left click while the bar passes.
 - **Strings:** tracks each note down its lane and presses at the predicted moment it reaches the
   circle. It then times when the circle lights up against when the note crossed it, and nudges
   the timing toward Perfect (*auto-tune note timing*).
@@ -60,8 +64,9 @@ the zip it creates.
 Detection is based on contrast and shapes, not fixed colors or positions, so it handles
 different window sizes, rarer (purple) scrooms, dark areas and snow.
 
-What it touches on your PC: screenshots of the Roblox window only, mouse clicks, your
-instrument's hotbar key, and one registered hotkey. Settings, a log and debug screenshots are
+What it touches on your PC: screenshots of the Roblox window only, mouse clicks (and mouse
+moves inside the game window for wind), your instrument's hotbar key and A/S/D/F, and one
+registered hotkey. Settings, a log and debug screenshots are
 saved next to the exe.
 
 ## Discord alerts
