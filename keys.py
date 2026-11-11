@@ -78,12 +78,26 @@ def next_tiles(img, ox, oy, board):
     ya = int(board.line_y - TOP * L - oy)
     yb = int(board.line_y - 0.01 * L - oy)          # stop above the bottom line
     half = int(0.33 * L / 4)
+    y0 = max(0, ya)
+    blue_end = int(board.line_y - 0.1 * L - oy) - y0     # the slot row can glow when pressed
     for k, lane in enumerate(LANES):
         x = int(board.col_x(k) - ox)
-        m = img[max(0, ya):max(0, yb), max(0, x - half):x + half].min(axis=2) >= 200
-        rows = m.sum(axis=1) >= max(4, half)
+        sub = img[y0:max(0, yb), max(0, x - half):x + half].astype(np.int16)
+        r, g, b = sub[..., 0], sub[..., 1], sub[..., 2]
+        white = sub.min(axis=2) >= 200
+        # special notes (instrument abilities): a blue icon tile ...
+        blue = (b >= 160) & (b - r >= 60) & (b - g >= 20)
+        blue[max(0, blue_end):] = False
+        rows = (white | blue).sum(axis=1) >= max(4, half)
         runs = [(a, e) for a, e in detect._runs(rows) if e - a >= max(4, 0.03 * L)]
-        out[lane] = (max(0, ya) + (runs[-1][0] + runs[-1][1]) / 2 + oy) if runs else None
+        # ... and a thin white sword, narrower than a tile but tall
+        thin = white.sum(axis=1) >= max(2, int(0.08 * L / 4))
+        runs += [(a, e) for a, e in detect._runs(thin) if e - a >= 0.15 * L]
+        if runs:
+            a, e = max(runs, key=lambda s: s[1])          # the lowest one
+            out[lane] = y0 + (a + e) / 2 + oy
+        else:
+            out[lane] = None
     return out
 
 

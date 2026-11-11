@@ -3,6 +3,7 @@ SCROOM MACRO - PATCH NOTES
 
 v2.0.1
 ------
+- Keys: special ability notes (the sword and the blue icon note) are played.
 - Fixed: the tuning (cast) ring wasn't found when the camera was turned and
   the ring floated near the side of the screen.
 - Fixed: starting the macro shrank a maximized/fullscreen Roblox window.
