@@ -3,6 +3,11 @@ SCROOM MACRO - PATCH NOTES
 
 v2.0.1
 ------
+- Fixed: the character walked a bit after a keys minigame (the macro pressed
+  keys for leftover tiles while the board was closing).
+- Fixed: tuning and count-in clicks are steadier - the learned latency no
+  longer jumps around from one cast to the next.
+- Fixed: Roblox started from Voidstrap/Bloxstrap with a renamed window is found.
 - Keys: special ability notes (the sword and the blue icon note) are played.
 - Fixed: the tuning (cast) ring wasn't found when the camera was turned and
   the ring floated near the side of the screen.

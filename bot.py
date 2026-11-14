@@ -307,6 +307,7 @@ class Bot:
         self.held = False
         self.last_click_t = 0.0
         self.landings = 0
+        self.delays = deque(maxlen=7)  # recent click -> registered delays (ms)
         self._last_report = time.time()
         self.stop_reason = None        # why it stopped by itself (None = you stopped it)
         self._last_progress = time.time()
@@ -800,10 +801,15 @@ class Bot:
         msg = (f"Landed at {math.degrees(landed):.0f} deg, {abs(math.degrees(err)):.0f} deg "
                f"{'late' if err > 0 else 'early'} (real delay {delay * 1000:.0f} ms)")
         if self.cfg.auto_latency and -0.05 <= delay <= 0.35:
-            # first landing of the session: trust it fully; after that, average
-            gain = 1.0 if self.landings == 0 else 0.4
+            # one landing is a noisy reading (it jumped 0..57 ms cast to cast on
+            # a slow PC, which made the next click miss): use the middle of the
+            # last few instead of chasing each one
             self.landings += 1
-            new = (1 - gain) * self.cfg.latency_ms + gain * max(0.0, delay) * 1000
+            self.delays.append(max(0.0, delay) * 1000)
+            if len(self.delays) >= 3:
+                new = float(np.median(self.delays))
+            else:
+                new = (self.cfg.latency_ms + sum(self.delays)) / (1 + len(self.delays))
             self.cfg.latency_ms = int(round(min(300, new)))
             msg += f" -> latency now {self.cfg.latency_ms} ms"
         self.log(msg)
@@ -892,9 +898,9 @@ class Bot:
 
     def do_keys(self):
         """Keys: Piano-Tiles, 4 columns, keys A S D F (tiles fall at a steady speed)."""
-        self.do_lanes("Keys", self.keys, keys.LANES, 0.22, keybinds=self.cfg.keys_keys)
+        self.do_lanes("Keys", self.keys, keys.LANES, 0.22, keybinds=self.cfg.keys_keys, steady=True)
 
-    def do_lanes(self, name, look, lanes, v_frac, finder=None, keybinds=""):
+    def do_lanes(self, name, look, lanes, v_frac, finder=None, keybinds="", steady=False):
         """Note lanes: press a lane's key as its note reaches the hit spot.
         Notes are tracked per lane; the key goes down `latency` before the
         note's predicted arrival, so it registers right on the spot.
@@ -911,6 +917,7 @@ class Bot:
             self.log(f"{name}: keybinds '{keybinds}' aren't {len(lanes)} letter keys - using {''.join(lanes)}")
         timer = NoteTimer(lanes) if finder is not None and hasattr(finder, "marks") else None
         tuned = 0                              # timer.errors already used for tuning
+        blocked = {}                           # lane -> no presses until this time
         last_hw = None
         track = {k: Tracker(window=0.6) for k in lanes}
         is_hold = {k: False for k in lanes}    # the note we follow is a hold note
@@ -1010,6 +1017,18 @@ class Bot:
                         tr.add(now, y)
                     if not tr.samples:          # nothing measured for this note yet
                         continue
+                    if steady and not predicted and len(tr.samples) >= 3:
+                        # keys tiles fall at one steady speed. When the minigame
+                        # ends, the closing board drags the leftover tiles up and
+                        # then flings them down: pressing for those walks the
+                        # character (A/S/D move it)
+                        old = next((s for s in reversed(tr.samples) if now - s[0] >= 0.08), None)
+                        if old is not None:
+                            sp = (y - old[1]) / (now - old[0])
+                            if sp > 2.2 * v_default or sp < -0.3 * v_default:
+                                blocked[lane] = now + 0.8
+                                tr.reset()
+                                continue
                     if not predicted and now - tr.samples[-1][0] > 0.15:   # not moving: paused
                         tr.reset()
                         tr.add(now, y)
@@ -1020,6 +1039,9 @@ class Bot:
                     # at the exact moment (not up to a whole frame early/late)
                     if t_hit - lat <= frame_dt:
                         due.append((now + t_hit - lat, lane, y))
+                # the board isn't on screen in this read (the minigame is closing):
+                # a key pressed now would walk the character (A/S/D move it)
+                due = [d for d in due if now >= blocked.get(d[1], 0.0)]
                 for t_press, lane, y in sorted(due):
                     if t_press > self.io.now():
                         self.io.wait_until(min(t_press, now + 2 * frame_dt))
@@ -1616,7 +1638,10 @@ class WindowsIO:
 
         @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         def cb(hwnd, _):
-            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and self._title(hwnd) == "Roblox":
+            # by title, or by the game window's class: launchers like Voidstrap /
+            # Bloxstrap can rename the window
+            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and (
+                    self._title(hwnd) == "Roblox" or self._class(hwnd) == "WINDOWSCLIENT"):
                 found.append(hwnd)
             return True
 
@@ -1656,7 +1681,7 @@ class WindowsIO:
         if self.hwnd in (fg, root):
             return True
         # you're in a (different) Roblox window than the one we picked - use it
-        if self._title(root) == "Roblox" and self._area(root) > 0:
+        if (self._title(root) == "Roblox" or self._class(root) == "WINDOWSCLIENT") and self._area(root) > 0:
             self.hwnd = root
             return True
         return False
