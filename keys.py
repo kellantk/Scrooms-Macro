@@ -72,8 +72,12 @@ def find_board(img, ox, oy, w):
 
 
 def next_tiles(img, ox, oy, board):
-    """For each column: y (window px) of the lowest tile's center, or None."""
-    out = {}
+    """Returns (tiles, holds, bar_near), each keyed by column:
+      tiles:    y (window px) of the lowest tile's center, or None
+      holds:    True when that tile is a hold note (a grey bar trails above it)
+      bar_near: how much of the strip just above the slot row a hold bar covers
+    """
+    out, holds, bar_near = {}, {}, {}
     L = board.L
     ya = int(board.line_y - TOP * L - oy)
     yb = int(board.line_y - 0.01 * L - oy)          # stop above the bottom line
@@ -85,6 +89,21 @@ def next_tiles(img, ox, oy, board):
         sub = img[y0:max(0, yb), max(0, x - half):x + half].astype(np.int16)
         r, g, b = sub[..., 0], sub[..., 1], sub[..., 2]
         white = sub.min(axis=2) >= 200
+        # a hold note's bar: see-through grey, narrower than a tile - grey in
+        # the middle of the column but not at its sides
+        mx, mn = sub.max(axis=2), sub.min(axis=2)
+        grey = (mn >= 85) & (mn < 200) & (mx - mn <= 30)
+        c = grey.shape[1] // 2
+        q = max(2, int(0.18 * L / 4))
+        bar = grey[:, c - q:c + q].mean(axis=1) >= 0.8
+        for sx in (x - int(0.43 * L / 4), x + int(0.43 * L / 4)):
+            if 0 <= sx < img.shape[1]:
+                col = img[y0:max(0, yb), sx].astype(np.int16)
+                bar &= ~((col.min(axis=1) >= 85) & (col.max(axis=1) - col.min(axis=1) <= 30))
+        na, nb = int(board.line_y - 0.22 * L - oy) - y0, int(board.line_y - 0.09 * L - oy) - y0
+        strip = bar[max(0, na):max(0, nb)]
+        bar_near[lane] = float(strip.mean()) if strip.size else 0.0
+        holds[lane] = False
         # special notes (instrument abilities): a blue icon tile ...
         blue = (b >= 160) & (b - r >= 60) & (b - g >= 20)
         blue[max(0, blue_end):] = False
@@ -96,9 +115,11 @@ def next_tiles(img, ox, oy, board):
         if runs:
             a, e = max(runs, key=lambda s: s[1])          # the lowest one
             out[lane] = y0 + (a + e) / 2 + oy
+            above = bar[max(0, a - int(0.1 * L)):max(0, a - 2)]
+            holds[lane] = above.size >= 4 and float(above.mean()) >= 0.7
         else:
             out[lane] = None
-    return out
+    return out, holds, bar_near
 
 
 class KeysFinder:
@@ -107,6 +128,8 @@ class KeysFinder:
     def __init__(self):
         self.board = None
         self.misses = 0
+        self.holds = {}         # column -> the next tile is a hold note
+        self.bar_near = {}      # column -> hold bar coverage just above the slot row
 
     def region(self, w, h):
         if self.board:
@@ -126,4 +149,5 @@ class KeysFinder:
         else:
             self.misses = 0
             self.board = board
-        return board, next_tiles(img, ox, oy, board)
+        tiles, self.holds, self.bar_near = next_tiles(img, ox, oy, board)
+        return board, tiles

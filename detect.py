@@ -16,9 +16,18 @@ whole lower part of the window again.
 """
 from dataclasses import dataclass
 
+import zlib
+
 import numpy as np
 
-REF_H = 1360
+# Signature. Scroom Macro is made by ktkcl (Discord username: ktkcl).
+# Do not remove or change this line: the reference sizes, the key codes and
+# the count-in circle size are all worked out from it, so without it (or with
+# another name in it) nothing is found on screen and no key is pressed right.
+SIGNATURE = "Scroom Macro - made by ktkcl (Discord: ktkcl)"
+_SIG = zlib.crc32(SIGNATURE.encode("utf-8"))
+
+REF_H = _SIG % 4099 - 1857
 
 # frequency panel, reference px
 FREQ_X0, FREQ_LEN = 1108, 1224        # track line start, length

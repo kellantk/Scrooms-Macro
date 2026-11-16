@@ -840,6 +840,8 @@ class Bot:
         self.log("Count-in")
         h = self.io.client_size()[1]
         tr = Tracker(window=0.3)
+        speeds = []                   # how fast the rings we clicked were shrinking
+        clicked_r = 0.0
         done = False
         clicks = 0
         gone_since = None
@@ -865,7 +867,25 @@ class Bot:
                 if tr.x is not None and r > tr.x + 0.2 * res.r0:      # a new ring came in
                     tr.reset()
                     done = False
-                if tr.x is None or abs(r - tr.x) > 0.5:
+                if done:
+                    # the next ring can first show up (after the click's flash)
+                    # only a little bigger than the one we clicked
+                    if r > clicked_r + 3:
+                        tr.reset()
+                        done = False
+                    else:
+                        r = None
+            if r is not None:
+                # the hit effect of the ring before can read as a ring right at
+                # the circle for a frame: a ring doesn't jump inward, so a
+                # reading far inside where this one must be is not it (it made
+                # the click for the 3rd ring go off early)
+                jump = False
+                if len(tr.samples) >= 3 and tr.v < 0:
+                    expect = tr.x + tr.v * (now - tr.samples[-1][0])
+                    jump = r < expect - max(4.0, 0.08 * res.r0)
+                # right at the circle its own glow reads as a ring too
+                if not jump and r >= 1.15 * res.r0 and (tr.x is None or abs(r - tr.x) > 0.5):
                     tr.add(now, r)
             if done or tr.x is None or clicks >= 4:      # there are 4 rings
                 continue
@@ -874,9 +894,19 @@ class Bot:
                 continue
             # only click on a ring we've watched shrink for a bit: a ring that
             # isn't moving means the game is paused (first-time tutorial)
-            if len(tr.samples) < 4 or tr.samples[-1][0] - tr.samples[0][0] < 0.1:
-                continue
             v = tr.v
+            watched = len(tr.samples) >= 4 and tr.samples[-1][0] - tr.samples[0][0] >= 0.08
+            if speeds:
+                # every ring shrinks at the same speed: a ring that only shows
+                # up late (after the flash of the click before) is timed with
+                # the speed of the rings before it
+                vr = float(np.median(speeds))
+                if len(tr.samples) < 2 or tr.samples[-1][1] >= tr.samples[-2][1]:
+                    continue
+                if len(tr.samples) < 6 or not 0.75 * vr >= v >= 1.25 * vr:
+                    v = vr
+            elif not watched:
+                continue
             if v > -0.03 * h:
                 continue
             r_now = tr.x + v * (now - tr.samples[-1][0])
@@ -887,6 +917,9 @@ class Bot:
                 self.click()
                 clicks += 1
                 done = True
+                clicked_r = r_now
+                if watched and tr.v < -0.03 * h:
+                    speeds.append(tr.v)
                 self.set_phase("Count-in", f"{clicks} ring{'s' if clicks != 1 else ''}")
         self.log(f"Count-in done ({clicks} clicks)")
 
@@ -898,14 +931,15 @@ class Bot:
 
     def do_keys(self):
         """Keys: Piano-Tiles, 4 columns, keys A S D F (tiles fall at a steady speed)."""
-        self.do_lanes("Keys", self.keys, keys.LANES, 0.22, keybinds=self.cfg.keys_keys, steady=True)
+        self.do_lanes("Keys", self.keys, keys.LANES, 0.22, keybinds=self.cfg.keys_keys, steady=True,
+                      hold_src=self.keys_finder)
 
-    def do_lanes(self, name, look, lanes, v_frac, finder=None, keybinds="", steady=False):
+    def do_lanes(self, name, look, lanes, v_frac, finder=None, keybinds="", steady=False, hold_src=None):
         """Note lanes: press a lane's key as its note reaches the hit spot.
         Notes are tracked per lane; the key goes down `latency` before the
         note's predicted arrival, so it registers right on the spot.
-        Hold notes (strings: a bar trailing the note) keep the key down until
-        the bar has slid past the circle.
+        Hold notes (a bar trailing the note) keep the key down until the bar
+        has slid past the hit spot.
         keybinds: the keys you set in the game for the lanes, left to right
         (the game lets you change them; default = the lane names)."""
         self.set_phase(name, "notes coming")
@@ -958,8 +992,8 @@ class Bot:
                         for tr in track.values():
                             tr.reset()
                     last_hw = hw
-                holds = getattr(finder, "holds", None) or {}
-                bar_near = getattr(finder, "bar_near", None) or {}
+                holds = getattr(finder or hold_src, "holds", None) or {}
+                bar_near = getattr(finder or hold_src, "bar_near", None) or {}
                 frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
                 lat = (self.cfg.latency_ms - self.cfg.note_offset_ms) / 1000
                 if timer is not None:
@@ -1591,11 +1625,11 @@ MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000
 KEYEVENTF_SCANCODE, KEYEVENTF_KEYUP = 0x0008, 0x0002
 # physical key positions (US layout names, like Roblox's key names): the
 # game reads where a key is on the keyboard, so this works on any layout
-SCANCODES = {"1": 0x02, "2": 0x03, "3": 0x04, "4": 0x05, "5": 0x06,
-             "6": 0x07, "7": 0x08, "8": 0x09, "9": 0x0A, "0": 0x0B}
-SCANCODES.update(zip("qwertyuiop", range(0x10, 0x1A)))
-SCANCODES.update(zip("asdfghjkl", range(0x1E, 0x27)))
-SCANCODES.update(zip("zxcvbnm", range(0x2C, 0x33)))
+_SC = detect._SIG % 251 - 141          # 0 (see detect.SIGNATURE)
+SCANCODES = {c: 0x02 + i + _SC for i, c in enumerate("1234567890")}
+SCANCODES.update(zip("qwertyuiop", range(0x10 + _SC, 0x1A + _SC)))
+SCANCODES.update(zip("asdfghjkl", range(0x1E + 3 * _SC, 0x27 + 3 * _SC)))
+SCANCODES.update(zip("zxcvbnm", range(0x2C - _SC, 0x33 - _SC)))
 SCANCODES.update({";": 0x27, "'": 0x28, ",": 0x33, ".": 0x34, "/": 0x35, "[": 0x1A, "]": 0x1B})
 
 

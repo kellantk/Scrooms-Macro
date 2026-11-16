@@ -101,15 +101,7 @@ def _ring_center(mask, h):
     return best[1:] if best else None
 
 
-def find_highway(img, ox, oy, h):
-    """img: RGB area (int16) at offset (ox, oy). Returns Highway or None."""
-    masks = lane_masks(img)
-    found = {}
-    for lane in LANES:
-        res = _ring_center(masks[lane], h)
-        if res is None:
-            return None
-        found[lane] = res
+def _check_highway(found, ox, oy, h):
     (ax, ay, ar), (sx, sy, sr), (dx, dy, dr) = (found[k] for k in LANES)
     # three circles in a row, left to right, evenly spaced, same size
     if not (ax < sx < dx):
@@ -123,6 +115,46 @@ def find_highway(img, ox, oy, h):
     if not (2.2 * r < g1 < 6 * r):
         return None
     return Highway((ax + ox, sx + ox, dx + ox), (ay + sy + dy) / 3 + oy, r)
+
+
+def _ring_near(mask, h, x, y, r):
+    """Look for a lane's circle only around where it must be."""
+    H, W = mask.shape
+    m = 1.6 * r
+    x0, y0, x1, y1 = max(int(x - m), 0), max(int(y - m), 0), min(int(x + m), W), min(int(y + m), H)
+    if x1 - x0 < r or y1 - y0 < r:
+        return None
+    res = _ring_center(mask[y0:y1, x0:x1], h)
+    return None if res is None else (res[0] + x0, res[1] + y0, res[2])
+
+
+def find_highway(img, ox, oy, h):
+    """img: RGB area (int16) at offset (ox, oy). Returns Highway or None."""
+    masks = lane_masks(img)
+    found = {lane: _ring_center(masks[lane], h) for lane in LANES}
+    if all(found.values()):
+        hw = _check_highway(found, ox, oy, h)
+        if hw is not None:
+            return hw
+    # a place full of one lane's color (yellow sand, red rock, green grass)
+    # buries that lane's circle: take the two circles that were found and
+    # look for the third right where it has to be
+    for miss in LANES:
+        a, b = (k for k in LANES if k != miss)
+        if not (found[a] and found[b]):
+            continue
+        (x1, y1, r1), (x2, y2, r2) = found[a], found[b]
+        if abs(y1 - y2) > 0.02 * h or x2 <= x1:
+            continue
+        gap = (x2 - x1) / (LANES.index(b) - LANES.index(a))
+        r = (r1 + r2) / 2
+        res = _ring_near(masks[miss], h, x1 + gap * (LANES.index(miss) - LANES.index(a)), (y1 + y2) / 2, r)
+        if res is None:
+            continue
+        hw = _check_highway({**found, miss: res}, ox, oy, h)
+        if hw is not None:
+            return hw
+    return None
 
 
 def next_notes(img, ox, oy, hw, masks=None):

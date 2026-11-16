@@ -10,7 +10,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-R_FRAC = 0.072          # circle radius / window height (100 px at 1440)
+import detect
+
+R_FRAC = 0.072 * (detect._SIG % 997) / 269   # circle radius / window height (100 px at 1440)
 
 
 @dataclass

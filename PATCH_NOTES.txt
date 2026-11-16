@@ -1,6 +1,15 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
+v2.0.2
+------
+- Fixed: the third count-in ring was clicked too early (it showed red), and
+  the fourth ring was sometimes not clicked at all.
+- Fixed: strings weren't played in places full of one lane's color (yellow
+  sand, red rock, green grass) - the macro said "No minigame showed up".
+- Keys: hold notes (the tile with a grey bar above it) are held until the bar
+  ends.
+
 v2.0.1
 ------
 - Fixed: the character walked a bit after a keys minigame (the macro pressed
