@@ -1,6 +1,38 @@
 SCROOM MACRO - PATCH NOTES
 ==========================
 
+v2.1
+----
+The accuracy update. Every minigame was re-measured against recordings using
+the game's own Perfect / Good / Miss marks, and a practice range (simulated
+minigames, in the source code) now tests the macro at different window sizes,
+frame rates, PC speeds, input delays and sceneries.
+- Keys: aims at the lettered keys now. It used to press while the tile was
+  still in the row above them, which the game only scores "Good" (and misses
+  when the tiles are fast, like on Epic and rarer scrooms).
+- Count-in: clicks when the ring lies on the circle (yellow dot = Perfect).
+  It used to click a moment early, which only gets the green dot.
+- Strings: aims at the middle of the Perfect window, and the auto-tune now
+  also notices presses that are too early (before, it could only see late ones
+  and kept pushing the timing earlier).
+- Fixed: a note right behind another one in the same lane was pressed late or
+  not at all (strings and keys), and its press was dropped completely with a
+  low Latency setting.
+- Percussion: clicks were late because a note half hidden under the scroom was
+  read wrong. Notes are now placed by their visible edge.
+- Wind: follows notes that slide from one line to another, keeping the click
+  held all the way.
+- Hold notes (strings and keys): let go when the bar ends instead of a bit
+  before it.
+- Cast ring: learns your PC's delay from every cast now ("Couldn't see where
+  the click landed" is gone), and no longer clicks a pass it can't hit on time.
+- Presses and clicks are sent at the exact moment, also when the PC stutters.
+- Notes are timed from all of their readings and the speed the notes share,
+  which keeps presses steady on slow PCs.
+- Keys and wind are found on snow and other bright scenery.
+- The log tells how the game scored strings and keys, e.g. "12 notes pressed:
+  11 Perfect, 1 Good".
+
 v2.0.2
 ------
 - Fixed: the third count-in ring was clicked too early (it showed red), and

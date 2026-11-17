@@ -56,9 +56,15 @@ def find_lane(img, ox, oy, w):
     return None
 
 
-def read_notes(img, ox, oy, lane):
-    """Notes in the lane, left to right: list of (x_center, kind) with kind
-    'L' (white), 'R' (blue) or 'B' (big: both). Window px."""
+def read_notes(img, ox, oy, lane, widths=None):
+    """Notes in the lane, left to right: list of (x_center, kind, clipped,
+    right edge) with kind 'L' (white), 'R' (blue) or 'B' (big: both). Window px.
+
+    A note slides under the scroom's diamond before it arrives, so near the
+    end only its right part shows; the middle of what's visible then lags
+    behind the real middle (that made every click late). `widths` (kind ->
+    full width, filled in here from notes in full view) lets a half-hidden
+    note be placed from its right edge instead. clipped = it was."""
     L = lane.L
     half = 0.04 * L
     ya, yb = int(lane.y - half - oy), int(lane.y + half - oy)
@@ -73,22 +79,38 @@ def read_notes(img, ox, oy, lane):
     blue = ((b > 180) & (b - r > 90)).sum(axis=0) >= need
     white = ((band.min(axis=2) > 185) & (band.max(axis=2) - band.min(axis=2) < 40)).sum(axis=0) >= need
     minw = max(5, 0.015 * L)
-    blues = [((a + e) / 2, e - a) for a, e in detect._runs(blue) if e - a >= minw]
-    whites = [((a + e) / 2, e - a) for a, e in detect._runs(white) if e - a >= minw]
-    notes = []
+    edge = max(2, int(0.004 * L))
+    # (a note that's nearly gone under the scroom's diamond is only a sliver at the left end)
+    blues = [(a, e) for a, e in detect._runs(blue) if e - a >= (edge + 1 if a <= edge else minw)]
+    whites = [(a, e) for a, e in detect._runs(white) if e - a >= (edge + 1 if a <= edge else minw)]
+    found = []                      # (left, right, kind)
     used = set()
-    for bx, bw in blues:
+    for ba, be in blues:
         # big note: a white half right next to a blue half
-        partner = next((i for i, (wx, ww) in enumerate(whites)
-                        if i not in used and 0 < bx - wx < 0.09 * L), None)
+        partner = next((i for i, (wa, we) in enumerate(whites)
+                        if i not in used and 0 < (ba + be) / 2 - (wa + we) / 2 < 0.09 * L), None)
         if partner is not None:
             used.add(partner)
-            notes.append(((whites[partner][0] + bx) / 2 + xa + ox, "B"))
+            found.append((whites[partner][0], be, "B"))
         else:
-            notes.append((bx + xa + ox, "R"))
-    for i, (wx, ww) in enumerate(whites):
+            found.append((ba, be, "R"))
+    for i, (wa, we) in enumerate(whites):
         if i not in used:
-            notes.append((wx + xa + ox, "L"))
+            found.append((wa, we, "L"))
+    notes = []
+    for left, right, kind in found:
+        clip_l, clip_r = left <= edge, right >= (xb - xa) - edge
+        x = (left + right) / 2
+        if widths is not None:
+            if not clip_l and not clip_r:
+                seen = widths.setdefault(kind, [])
+                seen.append(right - left)
+                del seen[:-9]
+            elif kind in widths and len(widths[kind]) >= 2:
+                full = float(np.median(widths[kind]))
+                if full > right - left:
+                    x = right - full / 2 if clip_l else left + full / 2
+        notes.append((x + xa + ox, kind, clip_l, right + xa + ox))
     return sorted(notes)
 
 
@@ -98,6 +120,7 @@ class PercussionFinder:
     def __init__(self):
         self.lane = None
         self.misses = 0
+        self.widths = {}        # note kind -> widths seen in full view (px)
 
     def region(self, w, h):
         if self.lane:
@@ -116,5 +139,7 @@ class PercussionFinder:
             lane = self.lane
         else:
             self.misses = 0
+            if self.lane is not None and abs(lane.L - self.lane.L) > 0.03 * lane.L:
+                self.widths = {}             # another window size
             self.lane = lane
-        return lane, read_notes(img, ox, oy, lane)
+        return lane, read_notes(img, ox, oy, lane, self.widths)

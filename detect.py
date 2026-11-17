@@ -77,13 +77,15 @@ class HLine:
         return self.x1 - self.x0
 
 
-def line_ridge(v, gap=4, contrast=30):
+def line_ridge(v, gap=4, contrast=30, either=False):
     """v: 2D brightness. True where a pixel is a thin bright line: bright AND
     clearly brighter than the pixels `gap` rows above and below. Bright
-    backgrounds (lit grass, snow...) are bright everywhere, so they don't count."""
+    backgrounds (lit grass, snow...) are bright everywhere, so they don't count.
+    either=True: brighter than above OR below is enough - for a line along
+    the edge of a dark panel, with bright scenery right on its other side."""
     v = v.astype(np.int16)
     pad = np.pad(v, ((gap, gap), (0, 0)), mode="edge")
-    around = np.maximum(pad[:-2 * gap], pad[2 * gap:])
+    around = (np.minimum if either else np.maximum)(pad[:-2 * gap], pad[2 * gap:])
     return v - around >= contrast
 
 
@@ -100,7 +102,7 @@ def find_hlines(img, thresh, min_len, step=2, channel="min", ridge=False):
     else:
         bright = sub.min(axis=2) >= thresh
         if ridge:   # must also stand out from above/below (not just bright glare/snow)
-            bright &= line_ridge(sub.max(axis=2))
+            bright &= line_ridge(sub.max(axis=2), either=ridge == "either")
     need = min_len / step
     cand = np.flatnonzero(bright.sum(axis=1) >= need * 0.8)
     rows = []
@@ -635,3 +637,38 @@ class RingFinder:
                 if near.sum() >= max(3, 4 * s * s):
                     needle = _circ_mean(a[near])
         return Ring(cx + ox, cy + oy, r, needle, target, half_width, zone_mid)
+
+
+# ----------------------------------------------------------------- verdicts
+def label_counts(img, size):
+    """The game writes its verdict next to a minigame after each note:
+    "Perfect" (pale yellow), "Good" (pale green) or "Miss" (pink-red), with a
+    dark outline around the letters. Returns how many pixels of an RGB area
+    have each of those colors right next to something dark (so yellow sand or
+    green grass behind the label doesn't count). size: the letters' rough
+    stroke scale in px (strings: the circle radius)."""
+    a = img.astype(np.int16)
+    if a.shape[0] < 8 or a.shape[1] < 8:
+        return {"perfect": 0, "good": 0, "miss": 0}
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    dark = a.max(axis=2) < 90
+    near = np.zeros_like(dark)
+    d = max(2, int(round(0.1 * size)))
+    for k in range(1, d + 1):
+        near[:, k:] |= dark[:, :-k]
+        near[:, :-k] |= dark[:, k:]
+        near[k:, :] |= dark[:-k, :]
+        near[:-k, :] |= dark[k:, :]
+    return {
+        "perfect": int(((r > 215) & (g > 200) & (b < 190) & (r - b > 50) & (np.abs(r - g) < 45) & near).sum()),
+        "good": int(((g > 190) & (g - r > 25) & (g - b > 20) & (r > 110) & (b > 110) & near).sum()),
+        "miss": int(((r > 200) & (r - g > 90) & (r - b > 60) & near).sum()),
+    }
+
+
+def read_label(counts, size, base=None):
+    """'perfect' / 'good' / 'miss' / None from label_counts (minus what the
+    scenery alone gives, `base`)."""
+    c = {k: v - (base or {}).get(k, 0) for k, v in counts.items()}
+    best = max(c, key=c.get)
+    return best if c[best] >= 0.05 * size * size else None

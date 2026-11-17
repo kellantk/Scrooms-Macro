@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+import detect
+
 LANES = ("A", "S", "D")
 
 
@@ -159,14 +161,17 @@ def find_highway(img, ox, oy, h):
 
 def next_notes(img, ox, oy, hw, masks=None):
     """img is int16 RGB covering the highway's lower part. Returns
-    (notes, holds, bar_near), each keyed by lane:
+    (notes, holds, bar_near, bar_top), each keyed by lane:
       notes:    y (window px) of the lowest note still above its circle, or None
       holds:    True when that note is a hold note (a bar trails above it)
       bar_near: how much of the strip just above the circle a hold bar covers
-                (0..1) - the key stays down until the bar has passed"""
+                (0..1) - the key stays down until the bar has passed
+      bar_top:  y of the far end of the bar that reaches down to the circle
+                (None if there's none) - when that end gets to the circle,
+                the hold is over"""
     if masks is None:
         masks = lane_masks(img)
-    notes, holds, bar_near = {}, {}, {}
+    notes, holds, bar_near, bar_top = {}, {}, {}, {}
     r = hw.r
     y_lo = int(hw.cy - 9 * r - oy)            # how far up to look
     y_hi = int(hw.cy - 1.15 * r - oy)         # stop above the circle's own outline
@@ -184,6 +189,19 @@ def next_notes(img, ox, oy, hw, masks=None):
         rows = m.sum(axis=1)
         filled = np.flatnonzero(rows >= thick)
         holds[lane] = False
+        # the bar being held: lane-colored rows without a break from the
+        # circle upward
+        bar_top[lane] = None
+        on = rows >= thin
+        if on.size >= 3 and on[-3:].any():
+            k = len(on) - 1
+            while k >= 0 and not on[k]:
+                k -= 1
+            top = k
+            while top - 1 >= 0 and on[top - 1]:
+                top -= 1
+            if k - top >= 0.3 * r:
+                bar_top[lane] = max(0, y_lo) + top + oy
         # lowest pill: last run of filled rows that is tall enough to be a
         # note (the slot outline's rounded top is a thin arc, not a note)
         bottom = None
@@ -226,7 +244,7 @@ def next_notes(img, ox, oy, hw, masks=None):
                 strip = m[a0:a1, max(0, int(hx - 0.5 * r)):max(0, int(hx + 0.5 * r))].sum(axis=1)
                 holds[lane] = bool(strip.size) and (strip >= thin).mean() >= 0.6
         notes[lane] = max(0, y_lo) + center + oy
-    return notes, holds, bar_near
+    return notes, holds, bar_near, bar_top
 
 
 def hit_marks(img, ox, oy, hw, masks):
@@ -284,12 +302,15 @@ class StringsFinder:
         self.misses = 0
         self.holds = {}         # lane -> the next note is a hold note
         self.bar_near = {}      # lane -> hold bar coverage just above the circle
+        self.bar_top = {}       # lane -> y of the far end of the bar at the circle
         self.marks = {}         # lane -> (note core y, circle lit 0..1), for note timing
+        self.label = None       # pixel counts of the verdict text ("Perfect"...) left of the highway
+        self.label_size = 1.0
 
     def region(self, w, h):
         if self.hw:
             r = self.hw.r
-            return _clamp(self.hw.cx[0] - 5 * r, self.hw.cy - 10 * r, self.hw.cx[2] + 5 * r, self.hw.cy + 2 * r, w, h)
+            return _clamp(self.hw.cx[0] - 8 * r, self.hw.cy - 10 * r, self.hw.cx[2] + 5 * r, self.hw.cy + 2 * r, w, h)
         return _clamp(0.2 * w, 0.4 * h, 0.8 * w, 0.97 * h, w, h)
 
     def find(self, img, ox, oy, w, h):
@@ -324,11 +345,17 @@ class StringsFinder:
         else:
             self.misses = 0
             self.hw = hw
-        notes, self.holds, self.bar_near = next_notes(img, ox, oy, hw, masks)
+        notes, self.holds, self.bar_near, self.bar_top = next_notes(img, ox, oy, hw, masks)
         if seen < 2:
             # the highway is (nearly) gone - the minigame is closing: whatever
             # lane-colored thing is left on screen isn't a note
             notes = {k: None for k in LANES}
             self.holds = {k: False for k in LANES}
         self.marks = hit_marks(img, ox, oy, hw, masks)
+        # the game's verdict for the last note shows left of the A circle
+        r = hw.r
+        self.label_size = r
+        self.label = detect.label_counts(
+            img[max(0, int(hw.cy - 0.9 * r - oy)):max(0, int(hw.cy + 0.9 * r - oy)),
+                max(0, int(hw.cx[0] - 7.6 * r - ox)):max(0, int(hw.cx[0] - 2.0 * r - ox))], r)
         return hw, notes

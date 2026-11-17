@@ -33,6 +33,7 @@ the zip it creates.
 | `hotkeys.py` | The start/stop hotkey (Windows `RegisterHotKey` - no keyboard hook) |
 | `startup_check.py` | Checks the app's files on startup and shows a clear error if something's missing |
 | `make_version.py`, `build_exe.bat` | Build the `.exe` and release zip |
+| `sim/` | Practice range: simulated minigames to test the macro on (not part of the app) |
 
 **Supported instruments (Crescendo Valley update):** Strings, Keys, Percussion, Wind.
 
@@ -50,12 +51,20 @@ the zip it creates.
 - **Ring:** finds the ring by its green zone, measures the needle's speed and direction, and
   clicks on the calculated position. After each click it reads where the needle froze and
   learns your PC's delay (*auto-tune latency*).
+- **Count-in:** tracks each shrinking ring and clicks when it lies on the circle (the dot under
+  the circle turns yellow = Perfect).
 - **Wind:** turns every note on the staff into a time window from its bar's ends and the measured
-  scroll speed, moves the mouse so the scroom sits on the next note's line (learning how the
-  scroom follows the cursor), and holds left click while the bar passes.
-- **Strings:** tracks each note down its lane and presses at the predicted moment it reaches the
-  circle. It then times when the circle lights up against when the note crossed it, and nudges
-  the timing toward Perfect (*auto-tune note timing*).
+  scroll speed, moves the mouse so the scroom sits on the bar (following it when it slides to
+  another line, and learning how the scroom follows the cursor), and holds left click while the
+  bar passes.
+- **Strings / Keys / Percussion:** every note of one minigame moves the same way, so a note's
+  arrival is worked out from all of its readings together and the key or click is sent at that
+  exact moment. Keys tiles are hit on the lettered key row; hold notes are released when the
+  bar's end arrives.
+- **Strings auto-tune:** it times when the circle lights up against when the note crossed it,
+  and nudges the timing toward the middle of Perfect (*auto-tune note timing*).
+- **Where "Perfect" is** was measured on recordings, from the game's own Perfect / Good / Miss
+  labels; the log reports them after each strings or keys minigame.
 - **Frequency:** holding speeds the pin up to the right, releasing to the left. A
   bang-bang controller using the pin's measured acceleration brakes it onto the dot.
 - **Reel:** your clicks move the `< o >` dot, the scroom chases the dot, and the box moves on
@@ -88,6 +97,26 @@ python ScroomMacro.pyw
 
 To build the app folder and a release zip: run `build_exe.bat` (update `VERSION` in
 `ScroomMacro.pyw` and `PATCH_NOTES.txt` first).
+
+### Practice range
+
+`sim/` has simulated versions of the cast ring, the count-in and the four
+minigames. The macro plays them through the same code it uses on the real
+game, and the simulator knows exactly when every note should have been hit -
+so a change to `bot.py` can be checked in minutes, at any window size, frame
+rate, PC speed, input delay and scenery, without opening Roblox.
+
+```bash
+pip install pillow
+python -m sim.run                          # all four minigames (a few minutes)
+python -m sim.run --matrix                 # ... under every condition (slow PC, 30/144 fps, snow...)
+python -m sim.run keys --fps 30 --loop 30  # one minigame, slow PC, 30 fps game
+python -m sim.run wind --shot wind.png     # save a frame to look at
+```
+
+It prints, per minigame, how many notes were Perfect / Good / missed and how
+many ms off the presses were. The timing rules in it (where Perfect is) were
+measured on recordings of the real game; it doesn't ship in the app.
 
 ## License
 

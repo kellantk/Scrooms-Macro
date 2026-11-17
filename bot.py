@@ -36,8 +36,8 @@ class Config:
     equip_on_start: bool = True
     latency_ms: int = 60          # input -> screen delay to compensate for
     auto_latency: bool = True     # learn latency_ms from where ring clicks actually land
-    note_offset_ms: int = -30     # strings/keys: press this much later (+) or earlier (-) than the
-                                  # usual timing (measured: the macro landed ~30 ms after Perfect's middle)
+    note_offset_ms: int = 0       # strings/keys: press this much later (+) or earlier (-) than the
+                                  # usual timing (auto-tuned from the strings circles lighting up)
     auto_note_timing: bool = True # learn note_offset_ms from when the strings circles light up
     ring_timeout_s: float = 5.0   # ring up longer than this -> re-equip instrument and recast
     strings_keys: str = "ASD"     # your in-game keybinds for the strings lanes, left to right
@@ -136,73 +136,133 @@ def _save_png(path, rgb):
                 + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-def _note_fit(tr, v_default):
-    """Notes speed up as they come closer (the highway is in perspective):
-    fit y = c + b*t + a*t^2 to the note's recent readings (t relative to the
-    last one). Falls back to a straight line / default speed."""
-    if len(tr.samples) < 2:
-        return None
-    t = np.array([s[0] for s in tr.samples])
-    y = np.array([s[1] for s in tr.samples])
-    t = t - t[-1]
-    if len(t) >= 4 and t[-1] - t[0] >= 0.15:
-        a, b, c0 = np.polyfit(t, y, 2)
-        if b > 0.1 * v_default and a > -0.5 * v_default:
-            return max(a, 0.0), b, c0
-    b, c0 = np.polyfit(t, y, 1) if t[-1] - t[0] > 0.05 else (v_default, y[-1])
-    return 0.0, (b if b > 0.1 * v_default else v_default), c0
+class Motion:
+    """How notes move in one minigame, so a note's arrival is told from all
+    of its readings together.
+
+    Keys tiles fall at a steady speed. Strings notes speed up on the way down
+    (the highway is drawn in perspective); measured on recordings, 1/(y - yv)
+    changes steadily with time, yv being a fixed point ~20 circle-radii above
+    the circles. Either way there is a coordinate u(y) that is a straight line
+    in time, and every note of one minigame climbs it at the same rate. So
+    after a couple of notes a new one only needs its readings averaged, where
+    fitting a curve through a handful of noisy points (what this replaced)
+    made presses wander by 10-40 ms on slow PCs and came out late on average."""
+
+    def __init__(self, y_target, v_default, yv=None):
+        self.yv = yv
+        self.u_target = self.u(y_target)
+        # the rate a note has when it moves at v_default px/s at the hit spot
+        self.rate0 = v_default if yv is None else v_default / (y_target - yv) ** 2
+        self.rates = deque(maxlen=6)      # of the notes that went by
+
+    def u(self, y):
+        return y if self.yv is None else -1.0 / max(y - self.yv, 1.0)
+
+    def y(self, u):
+        return u if self.yv is None else self.yv - 1.0 / min(u, -1e-9)
+
+    def rate(self):
+        """The rate the notes share - once two of them have shown it."""
+        return float(np.median(self.rates)) if len(self.rates) >= 2 else None
+
+    def _line(self, samples):
+        """(rate, u at the last reading) of one note."""
+        t = np.array([s[0] for s in samples])
+        u = np.array([self.u(s[1]) for s in samples])
+        t = t - t[-1]
+        k = self.rate()
+        if k is None:
+            k = self.rate0
+            if len(t) >= 3 and t[-1] - t[0] >= 0.08:
+                kf = float(np.polyfit(t, u, 1)[0])
+                if 0.3 * self.rate0 < kf < 4 * self.rate0:
+                    k = kf
+        res = u - k * t
+        c = float(np.mean(res))
+        if len(res) >= 5:                 # leave out a stray misread or two
+            mad = float(np.median(np.abs(res - np.median(res))))
+            keep = np.abs(res - np.median(res)) <= 3 * 1.4826 * mad + 1e-12
+            if keep.sum() >= 3:
+                c = float(np.mean(res[keep]))
+        return k, c
+
+    def eta(self, samples, now, y_target=None):
+        """Seconds until the note's middle is on the hit spot (or at y_target)."""
+        if not samples:
+            return float("inf")
+        k, c = self._line(samples)
+        u_target = self.u_target if y_target is None else self.u(y_target)
+        return (u_target - c) / k - (now - samples[-1][0])
+
+    def pos(self, samples, now):
+        k, c = self._line(samples)
+        return self.y(c + k * (now - samples[-1][0]))
+
+    def learn(self, samples):
+        """A note is done: remember how fast it went."""
+        if len(samples) < 5 or samples[-1][0] - samples[0][0] < 0.2:
+            return
+        t = np.array([s[0] for s in samples])
+        u = np.array([self.u(s[1]) for s in samples])
+        k = float(np.polyfit(t - t[-1], u, 1)[0])
+        if not 0.3 * self.rate0 < k < 4 * self.rate0:
+            return
+        if self.rates and abs(k - np.median(self.rates)) > 0.15 * np.median(self.rates):
+            self.rates.clear()            # the notes changed speed: start over
+        self.rates.append(k)
 
 
-def note_pos(tr, now, v_default):
-    fit = _note_fit(tr, v_default)
-    dt = now - tr.samples[-1][0]
-    if fit is None:
-        return tr.x + v_default * dt
-    a, b, c0 = fit
-    return c0 + b * dt + a * dt * dt
+def commit_ahead(frame_dt):
+    """How far ahead of its moment a press is handed to the precise timer.
+    Deciding only on the very last screen read meant one slow read (another
+    program hogging the PC for 50 ms) made the press late; a little earlier,
+    the wait is then timed exactly and nothing can get in between."""
+    return max(2.5 * frame_dt, 0.03)
 
 
-def time_to_reach(tr, now, y_target, v_default):
-    """Seconds until the note's center reaches y_target."""
-    if not tr.samples:
-        return float("inf")
-    fit = _note_fit(tr, v_default)
-    if fit is None:
-        return (y_target - tr.x) / v_default
-    a, b, c0 = fit
-    dt = now - tr.samples[-1][0]
-    # solve a*T^2 + b*T + c0 = y_target for T >= dt
-    if a > 1e-6:
-        disc = b * b + 4 * a * (y_target - c0)
-        T = (-b + np.sqrt(max(disc, 0.0))) / (2 * a)
-    else:
-        T = (y_target - c0) / b
-    return float(T - dt)
-
-
-# strings: a Perfect press lights the circle about this long after the note's
-# middle crosses it (measured on manual Perfect hits: +33..+65 ms)
-NOTE_PERFECT_MS = 45
+# strings: where to land a press, as "the circle lights up this long after the
+# note's middle crosses it". Measured against the game's own labels on five
+# recordings (40 presses): every press from -45 to +50 ms got Perfect, and the
+# Goods all came in late (+50 and up). So: the middle of the safe stretch.
+NOTE_TARGET_MS = 0
+HOLD_EXTRA = 0.03       # hold notes: keep the key down this long past the bar's end (letting go early breaks the hold)
+STRINGS_YV = 20.3       # strings: the point the notes' motion runs away from, in circle radii above the circles
 STUCK_MINUTES = 10      # no catch for this long -> tell Discord
 
 
 class NoteTimer:
-    """Measures how late each strings press registered: when the note's white
-    core crosses the circle's center vs when the circle lights up (the game
-    took the key). Both are read from the same screen captures, so the
-    capture delay cancels out."""
+    """Measures how each strings press landed: when the note's white core
+    crosses the circle's center vs when the circle lights up (the game took
+    the key). Both come from the same screen captures, so the capture delay
+    cancels out. A press that comes early takes the note before it gets to
+    the circle; its crossing is then worked out from where it was heading."""
 
-    def __init__(self, lanes):
+    def __init__(self, lanes, motion=None):
+        self.motion = motion
         self.prev = {k: None for k in lanes}               # (t, core y) last read
+        self.core = {k: deque() for k in lanes}            # the core's recent readings
         self.cross = {k: deque(maxlen=8) for k in lanes}   # crossing times
         self.pressed = {k: deque(maxlen=8) for k in lanes}
-        self.pending = {k: deque() for k in lanes}         # lit times waiting for their crossing
+        self.pending = {k: deque() for k in lanes}         # (lit time, expected crossing) to be paired
         self.lit = {k: False for k in lanes}
         self.unlit_t = {k: None for k in lanes}            # last read with the circle dark
         self.errors = []                                   # ms, lit - crossing
 
     def press(self, lane, t):
         self.pressed[lane].append(t)
+
+    def rebase(self, step_ms):
+        """The timing was just moved by step_ms: what was measured before
+        would have come out that much different."""
+        self.errors = [e + step_ms for e in self.errors]
+
+    def _heading(self, lane, cy, r, now):
+        """When the core we were watching would have crossed the center."""
+        core = [s for s in self.core[lane] if s[1] < cy]
+        if self.motion is None or len(core) < 3 or now - core[-1][0] > 0.15 or core[-1][1] < cy - 2.6 * r:
+            return None
+        return core[-1][0] + self.motion.eta(core, core[-1][0])
 
     def update(self, marks, cy, r, now):
         for lane, (wy, lit) in marks.items():
@@ -212,28 +272,42 @@ class NoteTimer:
             if wy is not None and p is not None and p[1] < cy <= wy and wy - p[1] < 1.5 * r and now > p[0]:
                 self.cross[lane].append(p[0] + (cy - p[1]) / (wy - p[1]) * (now - p[0]))
             self.prev[lane] = (now, wy) if wy is not None else None
+            core = self.core[lane]
+            if wy is not None:
+                if core and (wy < core[-1][1] - 0.5 * r or now - core[-1][0] > 0.25):
+                    core.clear()                           # another note
+                if not core or abs(wy - core[-1][1]) > 0.5:
+                    core.append((now, wy))
+                while core and now - core[0][0] > 0.5:
+                    core.popleft()
             # a press fills the whole circle with no note left in it (a note
             # sliding over the circle only covers ~0.6-0.7 of it)
             on = lit > 0.9 and (wy is None or wy < cy - 1.2 * r)
             if on and not self.lit[lane]:
                 u = self.unlit_t[lane]
                 # lit somewhere between the last dark read and this one
-                self.pending[lane].append((u + now) / 2 if u is not None and now - u < 0.05 else now)
+                t_lit = (u + now) / 2 if u is not None and now - u < 0.05 else now
+                self.pending[lane].append((t_lit, self._heading(lane, cy, r, now)))
+                core.clear()
             if not on:
                 self.unlit_t[lane] = now
             self.lit[lane] = on
-            # an early press lights the circle before the note crosses: wait a bit
+            # a late press lights the circle after the note crossed: wait a bit
             pend = self.pending[lane]
-            while pend and now - pend[0] > 0.15:
-                self._pair(lane, pend.popleft())
+            while pend and now - pend[0][0] > 0.15:
+                self._pair(lane, *pend.popleft())
 
-    def _pair(self, lane, t_lit):
+    def _pair(self, lane, t_lit, heading):
         if not any(-0.05 < t_lit - tp < 0.35 for tp in self.pressed[lane]):
             return          # not one of our presses
         c = [x for x in self.cross[lane] if -0.1 < t_lit - x < 0.3]
         if c:
-            x = min(c, key=lambda x: abs(t_lit - x - NOTE_PERFECT_MS / 1000))
-            self.errors.append((t_lit - x) * 1000)
+            x = min(c, key=lambda x: abs(t_lit - x - NOTE_TARGET_MS / 1000))
+        elif heading is not None and -0.2 < t_lit - heading < 0.1:
+            x = heading
+        else:
+            return
+        self.errors.append((t_lit - x) * 1000)
 
 
 def _circ_center(a, tol=math.radians(15)):
@@ -583,6 +657,14 @@ class Bot:
 
     def cycle(self):
         """One cast -> ring -> (count-in) -> minigame attempt."""
+        import gc
+        gc.disable()          # a collection pause in the middle of a note costs a press
+        try:
+            self._cycle()
+        finally:
+            gc.enable()
+
+    def _cycle(self):
         self.maybe_report()
         self.wait_focus()
         if self.stopped():
@@ -733,12 +815,17 @@ class Bot:
             diff = detect._ang_diff(target, needle)
             if omega < 0:
                 diff = -diff
-            if diff < -0.15:
+            if diff < 0:
                 diff += 2 * math.pi
             t_hit = diff / abs(omega)
             frame_dt = max(sum(loop_dt) / len(loop_dt), 0.008) if loop_dt else 0.03
             wait = t_hit - lat
-            if wait <= frame_dt:
+            # too late to land this pass on the target (the click needs `lat`
+            # to get there)? Then it's the next lap, ~1.2 s on: clicking anyway
+            # landed 30-70 ms past the Perfect part.
+            if wait < -(0.012 if self.cfg.aim_perfect else 0.05):
+                wait += 2 * math.pi / abs(omega)
+            if wait <= commit_ahead(frame_dt):
                 if wait > 0:
                     self.io.wait_until(now + wait)   # precise, not a coarse sleep
                 self.click()
@@ -765,31 +852,36 @@ class Bot:
 
     def learn_from_landing(self, at_click, omega, target, t_click):
         """After a click the needle freezes where the game registered it.
-        Read that spot and nudge latency_ms so the next click lands on target."""
-        # frozen = the needle stays put for 0.15 s+ (a spinning one covers ~45 deg
-        # in that time). Repeated identical frames alone don't count.
-        reads = deque()
+        Read that spot and nudge latency_ms so the next click lands on target.
+
+        What the game shows (from recordings): the ring flashes away for about
+        0.3 s, comes back with the needle frozen for only ~0.2 s, then it's
+        gone - and some reads of that frozen ring are garbage. So: collect
+        every needle reading that's a believable landing (0-0.35 s of spin past
+        where we clicked) and take the angle that several of them, spread over
+        a few frames, agree on. (Waiting for 0.15 s of steady readings, as
+        before, usually ran out of ring: "Couldn't see where the click landed".)"""
+        reads = []                     # (time, needle angle) that could be the landing
         landed = None
-        while not self.stopped() and self.io.now() - t_click < 1.4:
+        seen = None                    # last time the ring was there at all
+        while not self.stopped() and self.io.now() - t_click < 1.3:
             now = self.io.now()
-            if now - t_click < 0.2:      # ring flashes right after the click
+            if now - t_click < 0.1:      # the click itself is still on its way
                 self.io.sleep(0.02)
                 continue
             r = self.ring()
             if r is None or r.needle is None:
-                if self.freq():
-                    break
+                if seen is not None and now - seen > 0.3 and reads:
+                    break              # it came back and has gone for good
                 self.io.sleep(0.01)
                 continue
-            reads.append((now, r.needle))
-            while reads and now - reads[0][0] > 0.2:
-                reads.popleft()
-            if len(reads) >= 3 and reads[-1][0] - reads[0][0] >= 0.15:
-                a = np.array([x[1] for x in reads])
-                center = _circ_center(a, math.radians(4))
-                if np.abs((a - center + np.pi) % (2 * np.pi) - np.pi).max() < math.radians(3):
-                    landed = center
-                    break
+            seen = now
+            moved = detect._ang_diff(r.needle, at_click) * (1 if omega > 0 else -1)
+            if -0.05 <= moved / abs(omega) <= 0.35:
+                reads.append((now, r.needle))
+            landed = self._frozen(reads)
+            if landed is not None and len(reads) >= 5:
+                break
         if landed is None:
             self.log("Couldn't see where the click landed")
             return
@@ -814,113 +906,168 @@ class Bot:
             msg += f" -> latency now {self.cfg.latency_ms} ms"
         self.log(msg)
 
-    def tune_notes(self, errs):
-        """Nudge note_offset_ms so strings presses land where Perfect is.
-        errs: recent presses, ms the key registered after the note's middle."""
+    @staticmethod
+    def _frozen(reads):
+        """The angle a frozen needle sits at: 3+ of the readings within 3
+        degrees of each other, at least 0.05 s apart (a spinning needle covers
+        15 degrees in that time). None if there's no such angle yet."""
+        if len(reads) < 3:
+            return None
+        t = np.array([x[0] for x in reads])
+        a = np.array([x[1] for x in reads])
+        center = _circ_center(a, math.radians(3))
+        inl = np.abs((a - center + np.pi) % (2 * np.pi) - np.pi) < math.radians(3)
+        if inl.sum() < 3 or t[inl].max() - t[inl].min() < 0.05:
+            return None
+        return float(np.arctan2(np.sin(a[inl]).mean(), np.cos(a[inl]).mean()))
+
+    def tune_notes(self, timer):
+        """Nudge note_offset_ms so strings presses land in the middle of
+        Perfect. timer.errors: ms each press registered after its note's
+        middle crossed the circle (seen in the game itself)."""
         if not self.cfg.auto_note_timing or self.cfg.dry_run:
             return
-        med = float(np.median(errs))
-        diff = med - NOTE_PERFECT_MS
-        if abs(diff) < 8:                      # already in the Perfect window
+        med = float(np.median(timer.errors[-8:]))
+        diff = med - NOTE_TARGET_MS
+        if abs(diff) < 8:                      # close enough: don't chase noise
             return
         old = self.cfg.note_offset_ms
-        step = max(-25.0, min(25.0, 0.6 * diff))
-        self.cfg.note_offset_ms = int(round(max(-150, min(150, old - step))))
+        new = int(round(max(-150, min(150, old - max(-25.0, min(25.0, 0.6 * diff))))))
+        if new == old:
+            return
+        self.cfg.note_offset_ms = new
+        timer.rebase(new - old)
         self.log(f"Note timing: presses landed {abs(diff):.0f} ms {'late' if diff > 0 else 'early'} "
-                 f"-> note timing {old} -> {self.cfg.note_offset_ms} ms")
+                 f"-> note timing {old} -> {new} ms")
 
     # ---------------------------------------------------------- count-in
     def do_countin(self):
         """Rings shrink onto the circle around the scroom: click as each one
-        touches it (radius ~1.12x the circle, where the game gives Perfect).
-        The ring is hard to see in the last moment, so its arrival is predicted
-        from how fast it's shrinking."""
+        lies on it (that's where the game gives Perfect - see countin.py).
+        A ring can't be told from the circle in its last moments, so its
+        arrival is worked out from how fast it's shrinking (all four shrink
+        at the same speed) and the click is sent at that exact moment."""
         lat = self.cfg.latency_ms / 1000
         self.set_phase("Count-in", "clicking the rings")
         self.log("Count-in")
         h = self.io.client_size()[1]
-        tr = Tracker(window=0.3)
+        tr = Tracker(window=0.4)
         speeds = []                   # how fast the rings we clicked were shrinking
         clicked_r = 0.0
-        done = False
+        done = False                  # the ring we follow has been clicked
+        armed = None                  # arrival time of a ring still due while the next one is followed
         clicks = 0
         gone_since = None
         loop_dt = deque(maxlen=10)
         prev_t = None
         t_start = self.io.now()
+        target, r0_seen = 0.0, 1.0
+
+        def arrival(now, target):
+            """Seconds until the ring we follow lies on the circle (None: can't tell yet)."""
+            if tr.x is None:
+                return None
+            v = tr.v
+            watched = len(tr.samples) >= 4 and tr.samples[-1][0] - tr.samples[0][0] >= 0.08
+            if speeds:
+                # a ring that only shows up late (after the flash of the click
+                # before) is timed with the speed of the rings before it
+                vr = float(np.median(speeds))
+                if len(tr.samples) < 2 or tr.samples[-1][1] >= tr.samples[-2][1]:
+                    return None
+                if len(tr.samples) < 6 or not 0.75 * vr >= v >= 1.25 * vr:
+                    v = vr
+            elif not watched:
+                # only click on a ring we've watched shrink for a bit: a ring that
+                # isn't moving means the game is paused (first-time tutorial)
+                return None
+            if v > -0.03 * h:
+                return None
+            return (tr.x + v * (now - tr.samples[-1][0]) - target) / -v
+
+        def click_at(t_click):
+            nonlocal clicks
+            if t_click > self.io.now():
+                self.io.wait_until(t_click)       # the exact moment, not "this read or the next"
+            self.click()
+            clicks += 1
+            self.set_phase("Count-in", f"{clicks} ring{'s' if clicks != 1 else ''}")
+
         while not self.stopped() and self.io.now() - t_start < 12:
             self.wait_focus()
             now = self.io.now()
             if prev_t is not None:
                 loop_dt.append(now - prev_t)
             prev_t = now
+            frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.03
+            ahead = commit_ahead(frame_dt)
             res = self.look(self.countin_finder)
             if res is None:
+                # the circle is out of sight (the last click's flash): a ring
+                # that's due meanwhile still gets its click
+                if armed is not None and armed - lat - now <= ahead:
+                    click_at(armed - lat)
+                    armed = None
+                elif not done and clicks < 4 and tr.x is not None and now - tr.samples[-1][0] < 0.3:
+                    e = arrival(now, target)
+                    if e is not None and e - lat <= ahead:
+                        click_at(now + e - lat)
+                        done = True
+                        clicked_r = target + 0.1 * r0_seen
                 gone_since = gone_since or now
                 if now - gone_since > 0.6:
                     break
                 continue
             gone_since = None
-            target = 1.12 * res.r0
+            target = countin.PERFECT * res.r0
+            r0_seen = res.r0
             r = res.ring
             if r is not None:
-                if tr.x is not None and r > tr.x + 0.2 * res.r0:      # a new ring came in
+                new = tr.x is not None and r > tr.x + 0.2 * res.r0
+                if done and not new and r <= clicked_r + 3:
+                    r = None                              # what's left of the ring we clicked
+                elif new or done:
+                    # the next ring is the nearest one now. If the one before
+                    # hasn't had its click yet (it only merged with the circle),
+                    # keep that click
+                    if not done and armed is None:
+                        e = arrival(now, target)
+                        if e is not None and -0.03 < e < 0.4:
+                            armed = now + e
                     tr.reset()
                     done = False
-                if done:
-                    # the next ring can first show up (after the click's flash)
-                    # only a little bigger than the one we clicked
-                    if r > clicked_r + 3:
-                        tr.reset()
-                        done = False
-                    else:
-                        r = None
             if r is not None:
                 # the hit effect of the ring before can read as a ring right at
                 # the circle for a frame: a ring doesn't jump inward, so a
-                # reading far inside where this one must be is not it (it made
-                # the click for the 3rd ring go off early)
+                # reading far inside where this one must be is not it
                 jump = False
                 if len(tr.samples) >= 3 and tr.v < 0:
                     expect = tr.x + tr.v * (now - tr.samples[-1][0])
                     jump = r < expect - max(4.0, 0.08 * res.r0)
-                # right at the circle its own glow reads as a ring too
-                if not jump and r >= 1.15 * res.r0 and (tr.x is None or abs(r - tr.x) > 0.5):
+                if not jump and r >= 1.08 * res.r0 and (tr.x is None or abs(r - tr.x) > 0.5):
                     tr.add(now, r)
+            if armed is not None:
+                if now - armed > 0.2 or clicks >= 4:
+                    armed = None
+                elif armed - lat - now <= ahead:
+                    click_at(armed - lat)
+                    armed = None
             if done or tr.x is None or clicks >= 4:      # there are 4 rings
                 continue
             if now - tr.samples[-1][0] > 0.4:
                 tr.reset()
                 continue
-            # only click on a ring we've watched shrink for a bit: a ring that
-            # isn't moving means the game is paused (first-time tutorial)
-            v = tr.v
-            watched = len(tr.samples) >= 4 and tr.samples[-1][0] - tr.samples[0][0] >= 0.08
-            if speeds:
-                # every ring shrinks at the same speed: a ring that only shows
-                # up late (after the flash of the click before) is timed with
-                # the speed of the rings before it
-                vr = float(np.median(speeds))
-                if len(tr.samples) < 2 or tr.samples[-1][1] >= tr.samples[-2][1]:
-                    continue
-                if len(tr.samples) < 6 or not 0.75 * vr >= v >= 1.25 * vr:
-                    v = vr
-            elif not watched:
+            e = arrival(now, target)
+            if e is None:
                 continue
-            if v > -0.03 * h:
-                continue
-            r_now = tr.x + v * (now - tr.samples[-1][0])
-            t_hit = (r_now - target) / -v
-            self.st.graph = {"mode": "countin", "r0": res.r0, "ring": r_now, "target": target, "clicks": clicks, "now": now}
-            frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.03
-            if t_hit - lat <= frame_dt * 0.5:
-                self.click()
-                clicks += 1
-                done = True
-                clicked_r = r_now
-                if watched and tr.v < -0.03 * h:
+            self.st.graph = {"mode": "countin", "r0": res.r0, "ring": target + e * abs(tr.v or 1), "target": target,
+                             "clicks": clicks, "now": now}
+            if e - lat <= ahead:
+                if len(tr.samples) >= 4 and tr.samples[-1][0] - tr.samples[0][0] >= 0.08 and tr.v < -0.03 * h:
                     speeds.append(tr.v)
-                self.set_phase("Count-in", f"{clicks} ring{'s' if clicks != 1 else ''}")
+                click_at(now + e - lat)
+                done = True
+                clicked_r = target + 0.1 * res.r0
         self.log(f"Count-in done ({clicks} clicks)")
 
     # ----------------------------------------------------------- strings
@@ -937,7 +1084,8 @@ class Bot:
     def do_lanes(self, name, look, lanes, v_frac, finder=None, keybinds="", steady=False, hold_src=None):
         """Note lanes: press a lane's key as its note reaches the hit spot.
         Notes are tracked per lane; the key goes down `latency` before the
-        note's predicted arrival, so it registers right on the spot.
+        note's arrival (worked out from all of its readings, see Motion), so
+        it registers right on the spot.
         Hold notes (a bar trailing the note) keep the key down until the bar
         has slid past the hit spot.
         keybinds: the keys you set in the game for the lanes, left to right
@@ -949,16 +1097,24 @@ class Bot:
         km = {lane: (kb[i] if ok else lane) for i, lane in enumerate(lanes)}
         if keybinds and not ok:
             self.log(f"{name}: keybinds '{keybinds}' aren't {len(lanes)} letter keys - using {''.join(lanes)}")
+        src = finder or hold_src               # where hold bars and the verdict labels are read
         timer = NoteTimer(lanes) if finder is not None and hasattr(finder, "marks") else None
         tuned = 0                              # timer.errors already used for tuning
+        motion = None
         blocked = {}                           # lane -> no presses until this time
         last_hw = None
-        track = {k: Tracker(window=0.6) for k in lanes}
+        track = {k: Tracker(window=1.5) for k in lanes}
         is_hold = {k: False for k in lanes}    # the note we follow is a hold note
-        holding = {}                           # lane -> [time down, reads without the bar]
-        done_y = {k: None for k in lanes}      # the note we already pressed for
+        holding = {}                           # lane -> [time down, reads without the bar, the bar's far end, deadline]
+        done_s = {k: None for k in lanes}      # readings of the note we already pressed for
         done_t = {k: -9.0 for k in lanes}
         release_at = {}                                  # key -> time to let go
+        higher = {k: 0 for k in lanes}                   # reads in a row with a note further up in front
+        armed = {}                                       # lane -> (arrival, y, hold?, readings) of a note
+        #                                                  still due while the next one is being followed
+        verdicts = {"perfect": 0, "good": 0, "miss": 0}  # what the game said about our presses
+        to_judge = []                                    # [press time, best label, its strength]
+        label_base = None                                # label colors the scenery alone has
         gone_since = None
         loop_dt = deque(maxlen=10)
         prev_t = None
@@ -992,21 +1148,66 @@ class Bot:
                         for tr in track.values():
                             tr.reset()
                     last_hw = hw
-                holds = getattr(finder or hold_src, "holds", None) or {}
-                bar_near = getattr(finder or hold_src, "bar_near", None) or {}
+                holds = getattr(src, "holds", None) or {}
+                bar_near = getattr(src, "bar_near", None) or {}
                 frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
+                ahead = commit_ahead(frame_dt)
                 lat = (self.cfg.latency_ms - self.cfg.note_offset_ms) / 1000
+                v_default = v_frac * self.io.client_size()[1]      # px/s near the hit spot
+                if motion is None or abs(hw.cy - motion_at[0]) > 0.3 * hw.r or abs(hw.r - motion_at[1]) > 0.05 * hw.r:
+                    motion = Motion(hw.cy, v_default, None if steady else hw.cy - STRINGS_YV * hw.r)
+                    motion_at = (hw.cy, hw.r)
+                    if timer is not None:
+                        timer.motion = motion
                 if timer is not None:
                     timer.update(finder.marks, hw.cy, hw.r, now)
                     if len(timer.errors) - tuned >= 4:
                         tuned = len(timer.errors)
-                        self.tune_notes(timer.errors[-8:])
-                v_default = v_frac * self.io.client_size()[1]      # px/s near the hit spot
-                # hold notes: let go once the bar has passed (2 reads in a row
-                # without it, so one bad frame doesn't drop the hold)
+                        self.tune_notes(timer)
+                # ---- what did the game say about our presses? (its label shows
+                # up next to the lanes a moment after each one)
+                counts = getattr(src, "label", None)
+                if counts:
+                    size = getattr(src, "label_size", hw.r)
+                    label_base = dict(counts) if label_base is None else \
+                        {k: min(label_base[k], v) for k, v in counts.items()}
+                    seen = detect.read_label(counts, size, label_base)
+                    for j in to_judge:
+                        if seen and 0.12 <= now - j[0] <= 0.5 and counts[seen] - label_base[seen] > j[2]:
+                            j[1], j[2] = seen, counts[seen] - label_base[seen]
+                    while to_judge and now - to_judge[0][0] > 0.5:
+                        j = to_judge.pop(0)
+                        if j[1]:
+                            verdicts[j[1]] += 1
+                # hold notes: let go when the far end of the bar gets to the hit
+                # spot. That moment is worked out from the end's readings on its
+                # way down, like a note's arrival. (Waiting until the bar was no
+                # longer seen above the circle let go 50-100 ms before the end.)
+                bar_top = getattr(src, "bar_top", None) or {}
+                # (keys: the bar sits on top of its tile, so its end is "there"
+                # half a tile before the key's middle)
+                hold_end = getattr(hw, "hold_end", 0.0)
                 for lane, h in list(holding.items()):
+                    bt = bar_top.get(lane)
+                    ends = h[2]
+                    if bt is not None:
+                        if ends.x is not None and bt < ends.x - hw.r:
+                            ends.reset()                  # not the same end
+                        if ends.x is None or abs(bt - ends.x) > 0.5:
+                            ends.add(now, bt)
                     h[1] = h[1] + 1 if bar_near.get(lane, 0.0) < 0.3 else 0
-                    if (h[1] >= 2 and now - h[0] > 0.12) or now - h[0] > 8.0:
+                    if h[1] >= 2 and now - h[0] > 0.12 and h[3] is None:
+                        h[3] = now + 0.2                  # the bar is out of sight: let go by then at the latest
+                    t_up = None
+                    if len(ends.samples) >= 4 and now - ends.samples[-1][0] < 0.6:
+                        t_up = now + motion.eta(ends.samples, now, hw.cy - hold_end) - lat + HOLD_EXTRA
+                    if h[3] is not None:
+                        t_up = h[3] if t_up is None else min(t_up, h[3])
+                    if now - h[0] > 8.0:
+                        t_up = now
+                    if t_up is not None and t_up - now <= ahead and now - h[0] > 0.12:
+                        if t_up > now:
+                            self.io.wait_until(t_up)
                         if not self.cfg.dry_run:
                             self.io.key_up(km[lane])
                         del holding[lane]
@@ -1025,8 +1226,8 @@ class Bot:
                         # vanishing far up the lane is gone, not hidden)
                         near = finder is None or (tr.x is not None and tr.x > hw.cy - 3 * hw.r)
                         if tr.x is not None and len(tr.samples) >= 2 and now - tr.samples[-1][0] < 0.4 and near:
-                            y = note_pos(tr, now, v_default)
-                            if y > hw.cy + hw.r:          # long past the circle: it's gone
+                            y = motion.pos(tr.samples, now)
+                            if y > hw.cy + hw.r:          # long past the hit spot: it's gone
                                 tr.reset()
                                 continue
                             predicted = True
@@ -1038,11 +1239,39 @@ class Bot:
                         predicted = False
                     # a note higher up than the one we were following = a new note
                     if tr.x is not None and y < tr.x - 2 * hw.r:
+                        # (one bad read mustn't make two notes out of one: it has
+                        # to be there again in the next read)
+                        higher[lane] += 1
+                        if higher[lane] < 2:
+                            continue
+                        # ...but the one before may still be on its last stretch
+                        # (out of sight under the circle's outline) with its press
+                        # not sent yet: keep that press. Losing it here dropped
+                        # notes for anyone whose latency setting is small.
+                        if (lane not in armed and len(tr.samples) >= 3 and now - tr.samples[-1][0] < 0.4
+                                and tr.samples[-1][0] - tr.samples[0][0] >= 0.05):
+                            t_arr = now + motion.eta(tr.samples, now)
+                            if -0.03 < t_arr - now < 0.5:
+                                armed[lane] = (t_arr, tr.x, is_hold[lane], list(tr.samples))
                         tr.reset()
-                    # still the note we already pressed for? ignore it until it's gone
-                    if done_y[lane] is not None and y >= done_y[lane] - 1.5 * hw.r and now - done_t[lane] < 0.5:
-                        continue
-                    done_y[lane] = None
+                    else:
+                        higher[lane] = 0
+                        if (not predicted and tr.x is not None
+                                and y > tr.x + 2 * hw.r + 1.5 * v_default * (now - tr.samples[-1][0])):
+                            # lower than the note we follow can have got: another
+                            # one (the note already armed showing again)
+                            if lane in armed:
+                                continue
+                            tr.reset()
+                    # still the note we already pressed for? ignore it until it's
+                    # gone. It is the one that's where that note must be by now -
+                    # the next note can be right behind it (fast charts), and
+                    # ignoring everything near the hit spot made that one late.
+                    if done_s[lane] is not None:
+                        if now - done_t[lane] > 0.5:
+                            done_s[lane] = None
+                        elif not predicted and y >= motion.pos(done_s[lane], now) - 1.2 * hw.r:
+                            continue
                     if not tr.samples:
                         is_hold[lane] = False          # a new note
                     if not predicted:
@@ -1067,19 +1296,30 @@ class Bot:
                         tr.reset()
                         tr.add(now, y)
                         continue
-                    t_hit = time_to_reach(tr, now, hw.cy, v_default)
+                    t_hit = motion.eta(tr.samples, now)
                     upcoming[lane] = [t_hit]
                     # due before the next read comes in: press it this round,
                     # at the exact moment (not up to a whole frame early/late)
-                    if t_hit - lat <= frame_dt:
-                        due.append((now + t_hit - lat, lane, y))
+                    if t_hit - lat <= ahead:
+                        due.append((now + t_hit - lat, lane, y, False))
+                for lane, a in list(armed.items()):
+                    if lane in holding or now - a[0] > 0.3:
+                        del armed[lane]
+                    elif a[0] - now - lat <= ahead:
+                        due.append((a[0] - lat, lane, a[1], True))
                 # the board isn't on screen in this read (the minigame is closing):
                 # a key pressed now would walk the character (A/S/D move it)
                 due = [d for d in due if now >= blocked.get(d[1], 0.0)]
-                for t_press, lane, y in sorted(due):
+                for t_press, lane, y, was_armed in sorted(due):
                     if t_press > self.io.now():
-                        self.io.wait_until(min(t_press, now + 2 * frame_dt))
+                        self.io.wait_until(min(t_press, now + ahead + 0.01))
                     tp = self.io.now()
+                    if was_armed:
+                        _, _, hold, readings = armed.pop(lane)
+                    else:
+                        hold, readings = is_hold[lane], list(track[lane].samples)
+                        track[lane].reset()
+                        armed.pop(lane, None)
                     self.press_log.append((tp, lane))
                     if timer is not None:
                         timer.press(lane, tp)
@@ -1088,39 +1328,46 @@ class Bot:
                             self.io.key_up(km[lane])
                             del release_at[lane]
                         self.io.key_down(km[lane])
-                        if not is_hold[lane]:
+                        if not hold:
                             release_at[lane] = tp + 0.05
-                    if is_hold[lane]:
-                        holding[lane] = [tp, 0]
+                    if hold:
+                        holding[lane] = [tp, 0, Tracker(window=1.5), None]
                     presses += 1
-                    done_y[lane], done_t[lane] = y, tp
-                    track[lane].reset()
-                    self.set_phase(name, f"{'holding' if is_hold[lane] else 'pressed'} {lane}  ({presses} notes)")
+                    to_judge.append([tp, None, 0])
+                    done_s[lane], done_t[lane] = (readings or [(tp, y)]), tp
+                    motion.learn(readings)
+                    self.set_phase(name, f"{'holding' if hold else 'pressed'} {lane}  ({presses} notes)")
                 self.st.graph = {"mode": "lanes", "name": name, "lanes": list(lanes), "notes": upcoming,
                                  "presses": list(self.press_log), "now": now}
         finally:
             for k in set(release_at) | set(holding):
                 self.io.key_up(km[k])
-        self.log(f"{name} minigame finished ({presses} notes pressed)")
+        for j in to_judge:
+            if j[1]:
+                verdicts[j[1]] += 1
+        said = ", ".join(f"{n} {k.capitalize()}" for k, n in verdicts.items() if n)
+        self.log(f"{name} minigame finished ({presses} notes pressed" + (f": {said})" if said else ")"))
         if timer is not None and timer.errors:
             e = timer.errors
             self.log(f"Note timing: {len(e)} presses measured, keys landed {np.median(e):+.0f} ms after the notes' "
-                     f"middle (Perfect is about {NOTE_PERFECT_MS:+d}), spread {min(e):+.0f}..{max(e):+.0f}")
+                     f"middle (aiming for {NOTE_TARGET_MS:+d}), spread {min(e):+.0f}..{max(e):+.0f}")
             if len(e) - tuned >= 2:
-                self.tune_notes(e[-8:])
+                self.tune_notes(timer)
         if presses:
-            self.minigame_done(name, f"{presses} notes hit")
+            self.minigame_done(name, f"{presses} notes hit" + (f" ({said})" if said else ""))
 
     # -------------------------------------------------------------- wind
     def do_wind(self):
-        """Wind: a 5-line staff. Steer the scroom onto the next note's line by
-        moving the mouse up/down, and hold left click while that note's bar
-        slides past the scroom. All notes move left at the same speed, so each
-        one is turned into a time window (head arrives .. tail passes)."""
+        """Wind: a 5-line staff. Steer the scroom onto the note's bar by
+        moving the mouse up/down, and hold left click while the bar slides
+        past the scroom. All notes move left at the same speed, so each one
+        is turned into a time window (head arrives .. tail passes); where to
+        be at any moment is read off the bar itself, so a note that slides
+        from one line to another is followed all the way with the click held."""
         self.set_phase("Wind", "notes coming")
         self.log("Wind minigame")
         lead = self.cfg.latency_ms / 1000
-        sched = []                      # [line, on, off, on_seen, off_seen, id]
+        sched = []                      # notes as time windows (dicts, see below)
         next_id = 0
         speeds = deque(maxlen=20)       # px/s samples
         past = deque()                  # (t, readings) of the last ~0.1 s
@@ -1128,15 +1375,14 @@ class Bot:
         early_for = None                # note we already left early for the next one
         moved_since = 0.0
         speed = None                    # note speed as a fraction of the staff per second
-        learned = {}                    # line -> cursor y that put the scroom on it
-        nudges = 0
-        cur_line = None
-        moving = None                   # (time the cursor moved, line) until the scroom gets there
+        pairs = deque(maxlen=14)        # (scroom y, cursor y) each time the scroom came to rest
+        k_map, c_map = 1.0, 0.0         # cursor y = k * (where the scroom should be) + c
+        moving = None                   # (time the cursor jumped, where to) until the scroom gets there
         move_times = deque(maxlen=9)
         ys = deque()                    # scroom readings of the last 0.15 s (t, y)
         cur = None                      # cursor y we sent, and when
         cur_t = 0.0
-        line = None
+        goal = None                     # where we want the scroom
         held_id = None
         played = 0
         warned = False
@@ -1188,117 +1434,123 @@ class Bot:
                             a = getattr(n, k)
                             if not sx + 0.07 * L < a < right:
                                 continue
-                            shifts = [getattr(p, k) - a for p in past[0][1] if p.line == n.line
-                                      and sx + 0.07 * L < getattr(p, k) < right]
+                            shifts = [getattr(p, k) - a for p in past[0][1]
+                                      if sx + 0.07 * L < getattr(p, k) < right]
                             shifts = [d for d in shifts if 0.15 * L * dt < d < 1.2 * L * dt]
                             if shifts:
                                 speeds.append(min(shifts) / dt)
                 v = float(np.median(speeds)) if len(speeds) >= 3 else 0.43 * L
-                # ---- turn readings into time windows
+                # ---- turn readings into time windows: when the note's head gets
+                # to the scroom ("on") and when its bar has gone by ("off")
                 for n in reads:
                     lo, hi = now + (n.head - sx) / v, now + (n.tail - sx) / v
                     on = lo if sx + 0.07 * L < n.head < right else None
                     off = hi if sx + 0.07 * L < n.tail < right else None
-                    m = next((s for s in sched if s[0] == n.line and lo < s[2] + 0.1 and hi > s[1] - 0.1), None)
+                    m = next((q for q in sched if lo < q["off"] + 0.05 and hi > q["on"] - 0.05), None)
                     if m is None:
-                        sched.append([n.line, lo, hi, on is not None, off is not None, next_id])
+                        m = {"id": next_id, "on": lo, "off": hi, "on_seen": on is not None,
+                             "off_seen": off is not None, "line": n.line}
                         next_id += 1
-                        continue
-                    if on is not None:
-                        m[1] = on if not m[3] else 0.6 * m[1] + 0.4 * on
-                        m[3] = True
-                    elif not m[3]:
-                        m[1] = min(m[1], lo)
-                    if off is not None:
-                        m[2] = off if not m[4] else 0.6 * m[2] + 0.4 * off
-                        m[4] = True
-                    elif not m[4]:
-                        m[2] = max(m[2], hi)          # the bar is still coming in
-                sched = sorted((s for s in sched if s[2] > now - 0.3), key=lambda s: s[1])
+                        sched.append(m)
+                    else:
+                        if on is not None:
+                            m["on"] = on if not m["on_seen"] else 0.6 * m["on"] + 0.4 * on
+                            m["on_seen"] = True
+                        elif not m["on_seen"]:
+                            m["on"] = min(m["on"], lo)
+                        if off is not None:
+                            m["off"] = off if not m["off_seen"] else 0.6 * m["off"] + 0.4 * off
+                            m["off_seen"] = True
+                        elif not m["off_seen"]:
+                            m["off"] = max(m["off"], hi)      # the bar is still coming in
+                    m["note"], m["read"] = n, now
+                sched = sorted((q for q in sched if q["off"] > now - 0.3), key=lambda q: q["on"])
+
+                def bar_y(q, when):
+                    """Height of note q's bar where it meets the scroom at `when`."""
+                    n = q["note"]
+                    x = sx + v * (when - q["read"])       # that spot of the bar, where it was when read
+                    y = n.y_at(min(max(x, n.head), n.tail))
+                    return st.lines[q["line"]] if y is None else y
+
                 # ---- what to do now (judged `lead` ahead: the game sees it later)
                 t = now + lead
-                active = next((s for s in sched if s[1] <= t < s[2]), None)
-                nxt = next((s for s in sched if s[1] > t), None)
+                active = next((q for q in sched if q["on"] <= t < q["off"]), None)
+                nxt = next((q for q in sched if q["on"] > t), None)
+                # the scroom trails the cursor a little: aim where the bar will be
+                trail = float(np.clip(np.median(move_times) / 2.2, 0.02, 0.15)) if move_times else 0.05
+                want = None
                 if active is not None:
-                    line = active[0]
-                    # the next note starts right after this one on another line:
+                    want = bar_y(active, min(t + trail, active["off"]))
+                    # the next note starts right after this one at another height:
                     # start moving over just before this one ends (and stick to it)
                     early = float(np.clip(0.5 * np.median(move_times), 0.04, 0.2)) if move_times else 0.08
-                    if nxt is not None and nxt[0] != line and (
-                            early_for == active[5] or (nxt[1] - active[2] < 0.3 and t > active[2] - early)):
-                        line = nxt[0]
-                        early_for = active[5]
+                    if nxt is not None and (early_for == active["id"]
+                                            or (nxt["on"] - active["off"] < 0.3 and t > active["off"] - early)):
+                        y_next = bar_y(nxt, nxt["on"])
+                        if early_for == active["id"] or abs(y_next - bar_y(active, active["off"])) > 0.3 * st.spacing:
+                            want = y_next
+                            early_for = active["id"]
                 elif nxt is not None:
-                    line = nxt[0]
-                # ---- steer: cursor y -> scroom y, learned from where it settles
+                    want = bar_y(nxt, nxt["on"])
+                # ---- steer: where the cursor has to be for the scroom to sit at
+                # `want`. It should just follow the cursor's height, but that's
+                # checked, not assumed: each time it comes to rest, the pair
+                # (scroom, cursor) is kept and the relation re-fitted.
                 if sy is not None:
                     ys.append((now, sy))
                 while ys and now - ys[0][0] > 0.15:
                     ys.popleft()
-                if line is not None:
-                    want = st.lines[line]
-                    # cursor y for this line: what worked before, else a guess from
-                    # the lines learned so far (the scroom should just follow the
-                    # cursor's height, but that's checked, not assumed)
-                    known = sorted(learned.items())
-                    if line in learned:
-                        y_cur = learned[line]
-                    elif len(known) >= 2:
-                        k, c = np.polyfit([st.lines[i] for i, _ in known], [c for _, c in known], 1)
-                        y_cur = k * want + c
-                    elif known:
-                        y_cur = want + known[0][1] - st.lines[known[0][0]]
-                    else:
-                        y_cur = want
-                    y_cur = float(np.clip(y_cur, 2, self.io.client_size()[1] - 3))
+                if want is not None:
+                    y_cur = float(np.clip(k_map * want + c_map, 2, self.io.client_size()[1] - 3))
                     if cur is None or abs(y_cur - cur) >= 1:
                         if not self.cfg.dry_run:
                             self.io.move_to(min(st.x0 + 1.06 * L, self.io.client_size()[0] - 5), y_cur)
-                        if cur_line is not None and line != cur_line:
-                            moving = (now, line)        # time how long the scroom takes to get there
-                        cur, cur_t, cur_line = y_cur, now, line
+                        if goal is not None and abs(want - goal) > 0.7 * st.spacing:
+                            moving = (now, want)        # time how long the scroom takes to get there
+                        cur, cur_t = y_cur, now
+                    goal = want
                     if moving is not None and sy is not None:
-                        if moving[1] != line or now - moving[0] > 1.0:
+                        if abs(want - moving[1]) > 0.3 * st.spacing or now - moving[0] > 1.0:
                             moving = None
-                        elif abs(sy - st.lines[moving[1]]) < 0.15 * st.spacing:
+                        elif abs(sy - moving[1]) < 0.15 * st.spacing:
                             move_times.append(now - moving[0])
                             moving = None
-                    # settled (cursor still for a bit, scroom not moving)? check it
-                    # sits on the line; if not, nudge the cursor and remember
-                    if (cur_line == line and now - cur_t > 0.25 and len(ys) >= 3 and ys[-1][0] - ys[0][0] > 0.08
-                            and np.ptp([y for _, y in ys]) < 0.015 * st.D):
-                        err = want - ys[-1][1]
-                        if abs(err) <= 0.06 * st.spacing:
-                            learned[line] = cur
+                    # at rest (cursor still for a bit, scroom not moving)?
+                    if (now - cur_t > 0.25 and len(ys) >= 3 and ys[-1][0] - ys[0][0] > 0.08
+                            and np.ptp([y for _, y in ys]) < 0.015 * st.D
+                            and (not pairs or abs(pairs[-1][1] - cur) >= 1)):
+                        pairs.append((float(np.mean([y for _, y in ys])), cur))
+                        sc = np.array([q[0] for q in pairs])
+                        cu = np.array([q[1] for q in pairs])
+                        if len(pairs) >= 3 and np.ptp(sc) >= 0.8 * st.spacing:
+                            k, c = np.polyfit(sc, cu, 1)
+                            k_map = float(np.clip(k, 0.3, 6))
+                            c_map = float(np.mean(cu - k_map * sc))
                         else:
-                            slope = 1.0      # cursor px per scroom px
-                            if len(known) >= 2:
-                                k = np.polyfit([st.lines[i] for i, _ in known], [c for _, c in known], 1)[0]
-                                slope = float(np.clip(k, 0.3, 6))
-                            learned[line] = float(np.clip(cur + slope * err, 2, self.io.client_size()[1] - 3))
-                            nudges += 1
-                            if nudges == 6:
-                                self.log("Wind: the scroom doesn't sit where the mouse is - correcting")
-                            if nudges == 30 and not warned:
-                                warned = True
-                                self.log("Wind: the scroom doesn't follow the mouse")
-                                self.snapshot("wind-no-steer")
+                            k_map, c_map = 1.0, float(np.mean(cu - sc))
+                        off_by = abs(k_map * st.lines[2] + c_map - st.lines[2])
+                        if not warned and (off_by > 0.5 * st.spacing or abs(k_map - 1) > 0.2):
+                            warned = True
+                            self.log("Wind: the scroom doesn't sit where the mouse is - correcting")
+                            self.snapshot("wind-no-steer")
                 # ---- hold while a note's bar is at the scroom
                 want_hold = active is not None
-                if want_hold and held_id is not None and active[5] != held_id and self.held:
+                if want_hold and held_id is not None and active["id"] != held_id and self.held:
                     self.hold(False)            # a new note right after the last one: press again
                     self.io.sleep(0.03)
                 if want_hold and not self.held:
                     self.hold(True)
                     played += 1
                     speed = v / L
-                    self.set_phase("Wind", f"holding line {active[0] + 1}  ({played} notes)")
+                    self.set_phase("Wind", f"holding line {active['line'] + 1}  ({played} notes)")
                 elif not want_hold and self.held:
                     self.hold(False)
-                held_id = active[5] if want_hold else None
+                held_id = active["id"] if want_hold else None
                 sline = None if sy is None else (sy - st.top) / st.D
+                tline = None if want is None else int(np.abs(np.array(st.lines) - want).argmin())
                 self.st.graph = {"mode": "staff", "now": now, "scroom": sline, "hold": want_hold,
-                                 "notes": [(s[0], s[1] - now, s[2] - now) for s in sched], "target": line}
+                                 "notes": [(q["line"], q["on"] - now, q["off"] - now) for q in sched], "target": tline}
         finally:
             self.hold(False)
         self.log(f"Wind minigame finished ({played} notes played"
@@ -1309,13 +1561,18 @@ class Bot:
     # -------------------------------------------------------- percussion
     def do_perc(self):
         """One lane, notes slide left to the scroom: white = left click, blue =
-        right click, big = both. Notes move at a steady speed and slip under
-        the scroom's diamond just before arriving, so the arrival is predicted."""
+        right click, big = both. Notes move at one steady speed and slip under
+        the scroom's diamond just before arriving, so the arrival is worked
+        out from all of a note's readings (see Motion) and the click is sent
+        at that exact moment."""
         lat = self.cfg.latency_ms / 1000
         self.set_phase("Percussion", "notes coming")
         self.log("Percussion minigame")
-        tr = Tracker(window=0.4)
+        tr = Tracker(window=1.5)       # readings of -x: grows as the note comes in
         kind = None
+        armed = None                   # (arrival, kind, readings): a note still due while the next is followed
+        far_reads = 0                  # reads in a row with a note further right in front
+        motion = None
         done_x, done_t = None, -9.0
         release_at = {}
         gone_since = None
@@ -1323,6 +1580,7 @@ class Bot:
         prev_t = None
         hits = 0
         buttons = {"L": ("left",), "R": ("right",), "B": ("left", "right")}
+        gl = {"L": ["L"], "R": ["R"], "B": ["L", "R"]}
         try:
             while not self.stopped():
                 self.wait_focus()
@@ -1344,66 +1602,105 @@ class Bot:
                 gone_since = None
                 lane, notes = res
                 frame_dt = max(sum(loop_dt) / len(loop_dt), 0.005) if loop_dt else 0.02
-                v_default = -0.424 * self.io.client_size()[1]      # px/s (moving left)
+                ahead = commit_ahead(frame_dt)
+                v_default = 0.424 * self.io.client_size()[1]      # px/s (moving left)
+                if motion is None or abs(-lane.target_x - motion.u_target) > 0.01 * lane.L:
+                    motion = Motion(-lane.target_x, v_default)
                 # ignore the note we already hit until it disappears
                 if done_x is not None and now - done_t < 0.4:
                     notes = [n for n in notes if n[0] > done_x + 0.03 * lane.L]
                 lead = min(notes) if notes else None
-                # the note we follow just slipped under the scroom's diamond, and the
-                # next one (further right) is now the first visible - keep following
-                # the hidden one until we've hit it
-                if (lead is not None and tr.x is not None and lead[0] > tr.x + 0.05 * lane.L
-                        and tr.x < lane.target_x + 0.15 * lane.L and now - tr.samples[-1][0] < 0.4):
-                    lead = None
+                if lead is not None and tr.x is not None:
+                    back = -lead[0] - tr.x          # how far left of the note we follow (px)
+                    if back < -0.05 * lane.L:
+                        # a note further right is the first one in view now: the one
+                        # we followed has slipped under the scroom's diamond - its
+                        # click is still due. (Unless it's back in the next read:
+                        # one bad read mustn't make two notes out of one.)
+                        far_reads += 1
+                        if far_reads < 2:
+                            lead = None
+                        else:
+                            if (armed is None and len(tr.samples) >= 3 and now - tr.samples[-1][0] < 0.4
+                                    and tr.samples[-1][0] - tr.samples[0][0] >= 0.05):
+                                t_arr = now + motion.eta(tr.samples, now)
+                                if -0.03 < t_arr - now < 0.6:
+                                    armed = (t_arr, kind, list(tr.samples))
+                            tr.reset()
+                            kind = None
+                    else:
+                        far_reads = 0
+                        if back > 0.05 * lane.L + 1.5 * v_default * (now - tr.samples[-1][0]):
+                            # further left than the note we follow can have got:
+                            # another one (the note already armed showing again)
+                            if armed is not None:
+                                lead = None
+                            else:
+                                tr.reset()
+                                kind = None
                 if lead is not None:
-                    x, k = lead
-                    if tr.x is not None and x > tr.x + 0.05 * lane.L:   # a new note
-                        tr.reset()
-                        kind = None
-                    if tr.x is None or abs(x - tr.x) > 0.5:
-                        tr.add(now, x)
+                    x, k = lead[0], lead[1]
+                    # a big note loses its white half first as it slides under the
+                    # scroom's diamond - once seen as big, it stays big (and is
+                    # placed as the big note it is, from its right edge)
+                    if kind == "B" and k != "B" and lead[2]:
+                        full = self.perc_finder.widths.get("B")
+                        if full:
+                            x = lead[3] - float(np.median(full)) / 2
+                    kind = "B" if (k == "B" or kind == "B") else k
+                    if tr.x is None or abs(-x - tr.x) > 0.5:
+                        tr.add(now, -x)
                     elif now - tr.samples[-1][0] > 0.15:   # hasn't moved: paused
                         tr.reset()
-                        tr.add(now, x)
+                        tr.add(now, -x)
                         continue
-                    # a big note loses its white half first as it slides under the
-                    # scroom's diamond - once seen as big, it stays big
-                    kind = "B" if (k == "B" or kind == "B") else k
-                elif tr.x is None or now - tr.samples[-1][0] > 0.4:
+                elif tr.x is not None and now - tr.samples[-1][0] > 0.4:
                     tr.reset()
-                    continue
-                # where is it now (it slips under the scroom's diamond near the end)?
-                if len(tr.samples) >= 3 and tr.samples[-1][0] - tr.samples[0][0] > 0.1:
-                    v = tr.v
-                    if v > 0.3 * v_default:      # (v_default is negative) not moving:
-                        continue                 # the game is paused (tutorial) - press nothing
-                else:
-                    v = v_default
-                x_now = tr.x + v * (now - tr.samples[-1][0])
-                t_hit = (x_now - lane.target_x) / -v
-                gl = {"L": ["L"], "R": ["R"], "B": ["L", "R"]}
+                due = []                    # (click time, kind, readings, x now, armed?)
+                t_hit = None
+                if tr.samples:
+                    # the game is paused (first-time tutorial) while a note we've
+                    # watched for a while doesn't move: click nothing
+                    moving = not (len(tr.samples) >= 3 and tr.samples[-1][0] - tr.samples[0][0] > 0.1
+                                  and tr.v < 0.3 * v_default)
+                    t_hit = motion.eta(tr.samples, now)
+                    if moving and t_hit - lat <= ahead:
+                        due.append((now + t_hit - lat, kind, list(tr.samples), -motion.pos(tr.samples, now), False))
+                if armed is not None:
+                    if now - armed[0] > 0.3:
+                        armed = None
+                    elif armed[0] - now - lat <= ahead:
+                        due.append((armed[0] - lat, armed[1], armed[2], lane.target_x, True))
                 upcoming = {"L": [], "R": []}
-                for nx, nk in notes:
-                    for g in gl.get(nk, []):
-                        upcoming[g].append((nx - lane.target_x) / -v)
-                for g in gl.get(kind, []):
-                    upcoming[g].append(t_hit)
+                for n in notes:
+                    for g in gl.get(n[1], []):
+                        upcoming[g].append((n[0] - lane.target_x) / v_default)
                 self.st.graph = {"mode": "lanes", "name": "Percussion", "lanes": ["L", "R"], "labels": ["Left", "Right"],
                                  "notes": upcoming, "presses": list(self.press_log), "now": now}
-                if t_hit - lat <= frame_dt * 0.5:
-                    for g in gl.get(kind, ["L"]):
-                        self.press_log.append((now, g))
+                for t_click, knd, readings, x_now, was_armed in sorted(due, key=lambda d: d[0]):
+                    if t_click > self.io.now():
+                        self.io.wait_until(min(t_click, now + ahead + 0.01))
+                    tc = self.io.now()
+                    for g in gl.get(knd, ["L"]):
+                        self.press_log.append((tc, g))
                     if not self.cfg.dry_run:
-                        for btn in buttons.get(kind, ("left",)):
+                        for btn in buttons.get(knd, ("left",)):
                             if btn in release_at:
                                 self.io.button_up(btn)
                             self.io.button_down(btn)
-                            release_at[btn] = now + 0.05
+                            release_at[btn] = tc + 0.05
                     hits += 1
-                    done_x, done_t = x_now, now
-                    tr.reset()
-                    kind = None
-                    self.set_phase("Percussion", f"{ {'L': 'left', 'R': 'right', 'B': 'both'}.get(kind)} click  ({hits} notes)")
+                    motion.learn(readings)
+                    done_x, done_t = max(x_now, -readings[-1][1]) if was_armed else x_now, tc
+                    if was_armed:
+                        armed = None
+                        if tr.x is not None and -tr.x <= done_x + 0.03 * lane.L:
+                            tr.reset()                    # those were this note's readings
+                            kind = None
+                    else:
+                        tr.reset()
+                        kind = None
+                    self.set_phase("Percussion", f"{ {'L': 'left', 'R': 'right', 'B': 'both'}.get(knd, 'left')} click  ({hits} notes)")
         finally:
             for btn in release_at:
                 self.io.button_up(btn)

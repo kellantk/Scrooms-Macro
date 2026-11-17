@@ -20,7 +20,7 @@ import notify  # noqa: E402
 import updater  # noqa: E402
 
 APP = "Scroom Macro"
-VERSION = "2.0.2"
+VERSION = "2.1"
 REPO_URL = "https://github.com/kellantk/Scrooms-Macro"
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 SETTINGS = os.path.join(BASE, "settings.json")
@@ -66,17 +66,26 @@ def work_area():
     return 0, 0, 1920, 1040
 
 
+# The saved note timing only means something for the aim it was tuned with.
+# 2.1 aims strings and keys somewhere else than 2.0 did, so a note timing saved
+# by an older version starts over from 0.
+TUNED_FOR = "2.1"
+
+
 def load_settings():
     cfg, ui = bot.Config(), dict(UI_KEYS)
     try:
         with open(SETTINGS) as f:
             data = json.load(f)
+        tuned_for = data.pop("tuned_for", "")
         for k in UI_KEYS:
             if k in data:
                 ui[k] = type(UI_KEYS[k])(data.pop(k))
         for k, v in data.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, type(getattr(cfg, k))(v))
+        if tuned_for != TUNED_FOR:
+            cfg.note_offset_ms = bot.Config().note_offset_ms
     except (OSError, ValueError, TypeError):
         pass
     return cfg, ui
@@ -87,7 +96,7 @@ def save_settings(cfg, ui):
         data = asdict(cfg)
         data.pop("dry_run", None)
         with open(SETTINGS, "w") as f:
-            json.dump({**data, **ui}, f, indent=2)
+            json.dump({**data, **ui, "tuned_for": TUNED_FOR}, f, indent=2)
     except OSError:
         pass
 

@@ -5,12 +5,19 @@ outside, and you click as each ring reaches the circle. This finds the circle
 (radius ~7% of the window height) and measures the shrinking ring's radius,
 so the bot can click on time. It's a bonus (a head start): when the circle
 can't be found reliably, the bot simply doesn't click.
+
+The four dots under the circle show how each click went: yellow = Perfect,
+green = Good, red = Miss. On recordings the yellow ones were clicked with the
+ring lying right on the circle (1.0-1.08x its radius); at 1.1-1.15x - where
+the macro used to click - the dot only turns green.
 """
 from dataclasses import dataclass
 
 import numpy as np
 
 import detect
+
+PERFECT = 1.02          # click when the ring's radius is this many circle radii
 
 R_FRAC = 0.072 * (detect._SIG % 997) / 269   # circle radius / window height (100 px at 1440)
 
@@ -114,19 +121,33 @@ def locate(img, h, guess=None):
 
 
 def ring_radius(img, cx, cy, r0):
-    """Radius of the nearest shrinking ring outside the circle (or None).
-    One vectorized radial scan."""
+    """Radius of the nearest shrinking ring outside the circle (or None):
+    the middle of its white line. One vectorized radial scan.
+
+    Right after a badly timed click the circle itself puffs up and glows for
+    about half a second: a white band from the circle outward. That is not a
+    ring (the next ring is further out, with a dark gap before it), and
+    reading it as one hid the real next ring until the glow was over."""
     white = _white(img)
     H, W = white.shape
-    radii = np.arange(r0 * 1.12, r0 * 2.6, 1.5)
+    radii = np.arange(r0 * 1.03, r0 * 2.6, 1.0)
     t = np.linspace(0, 2 * np.pi, 64, endpoint=False)
     hit = np.zeros((len(radii), len(t)), bool)
-    for dr in (-1.5, 0, 1.5):
+    for dr in (-1, 0, 1):
         xs = np.clip((cx + (radii[:, None] + dr) * np.cos(t)).astype(int), 0, W - 1)
         ys = np.clip((cy + (radii[:, None] + dr) * np.sin(t)).astype(int), 0, H - 1)
         hit |= white[ys, xs]
-    good = np.flatnonzero(hit.mean(axis=1) >= 0.55)
-    return float(radii[good[0]]) if good.size else None
+    on = hit.mean(axis=1) >= 0.55
+    i = 0
+    while i < len(on) and on[i]:        # the circle's own outline / glow
+        i += 1
+    good = np.flatnonzero(on[i:])
+    if not good.size:
+        return None
+    a = e = i + int(good[0])
+    while e + 1 < len(on) and on[e + 1]:
+        e += 1
+    return float((radii[a] + radii[e]) / 2)
 
 
 class CountInFinder:

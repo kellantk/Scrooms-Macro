@@ -44,9 +44,18 @@ class Staff:
 
 @dataclass
 class Note:
-    line: int        # 0 = top line
+    line: int        # line its visible start is nearest to (0 = top line)
     head: float      # x of the head (window px); can be left of the scroom
     tail: float      # x where its bar ends
+    xs: tuple = ()   # the bar's path: x positions (window px, rising) ...
+    ys: tuple = ()   # ... and the bar's height there. Flat for most notes; a
+    #                  sliding note runs from one line to another
+
+    def y_at(self, x):
+        """Height of the bar at x (its ends' height beyond them)."""
+        if not self.xs:
+            return None
+        return float(np.interp(x, self.xs, self.ys))
 
 
 def _clamp(x0, y0, x1, y1, w, h):
@@ -56,7 +65,9 @@ def _clamp(x0, y0, x1, y1, w, h):
 
 
 def find_staff(img, ox, oy, h):
-    lines = detect.find_hlines(img, 170, 0.4 * h, ridge=True)
+    # (the two white lines run along the edges of the staff's dark backdrop:
+    # on snow the scenery beyond them is as bright as they are)
+    lines = detect.find_hlines(img, 170, 0.4 * h, ridge="either")
     for top, bot in sorted(detect._pairs(lines, *SPACING, overlap=0.8), key=lambda p: -p[1].y):
         L = max(top.length, bot.length)
         if not (0.5 * h < L < 0.9 * h):
@@ -104,33 +115,45 @@ def scroom_y(img, ox, oy, st):
 
 
 def read_notes(img, ox, oy, st):
-    """Notes on the staff (head + tail x, window px), left to right."""
+    """Notes on the staff (head + tail x and the bar's path, window px), left
+    to right. A bar is followed column by column, wherever it runs: most lie
+    flat on a line, some slide from one line to the next."""
     notes = []
-    half = max(2, int(0.035 * st.D))
     xa, xb = int(st.x0 - ox), int(st.x0 + st.L - ox)
-    if xa < 0 or xb > img.shape[1]:
+    ya, yb = int(st.top + 0.05 * st.D - oy), int(st.top + 0.95 * st.D - oy)
+    if xa < 0 or xb > img.shape[1] or ya < 0 or yb > img.shape[0] or yb - ya < 5:
         return notes
+    band = img[ya:yb, xa:xb].astype(np.int16)
+    r, g, b = band[..., 0], band[..., 1], band[..., 2]
+    mint = (g > 180) & (g - r > 15) & (g - b > 2) & (r > 110)
+    cnt = mint.sum(axis=0)
+    has = cnt >= 2
+    rows = np.arange(mint.shape[0], dtype=np.float32)[:, None]
+    yc = (mint * rows).sum(axis=0) / np.maximum(cnt, 1)
     # the scroom's own diamond covers the bar where it sits
     s0, s1 = int(st.sx - 0.045 * st.L - ox) - xa, int(st.sx + 0.045 * st.L - ox) - xa
     gap = max(3, int(0.012 * st.L))
-    for i, y in enumerate(st.lines):
-        yy = int(round(y - oy))
-        if yy - half < 0 or yy + half >= img.shape[0]:
+    runs = []
+    for a, e in detect._runs(has):
+        # join pieces split by a small gap or by the scroom's diamond - if
+        # they're at the same height (the next note on another line isn't it)
+        if runs and (a - runs[-1][1] <= gap or (runs[-1][1] >= s0 - gap and a <= s1 + gap)) \
+                and abs(yc[a] - yc[runs[-1][1] - 1]) <= 0.1 * st.D:
+            runs[-1][1] = e
+        else:
+            runs.append([a, e])
+    lines = np.array(st.lines)
+    for a, e in runs:
+        if e - a < 0.012 * st.L:
             continue
-        band = img[yy - half:yy + half + 1, xa:xb].astype(np.int16)
-        r, g, b = band[..., 0], band[..., 1], band[..., 2]
-        mint = ((g > 180) & (g - r > 15) & (g - b > 2) & (r > 110)).sum(axis=0) >= 2
-        runs = []
-        for a, e in detect._runs(mint):
-            # join pieces split by a small gap or by the scroom's diamond
-            if runs and (a - runs[-1][1] <= gap or (runs[-1][1] >= s0 - gap and a <= s1 + gap)):
-                runs[-1][1] = e
-            else:
-                runs.append([a, e])
-        for a, e in runs:
-            if e - a < 0.012 * st.L:
-                continue
-            notes.append(Note(i, a + xa + ox - HEAD * st.L, e + xa + ox))
+        cols = np.unique(np.linspace(a, e - 1, 14).astype(int))
+        cols = cols[has[cols]]
+        if not cols.size:
+            continue
+        xs = tuple(float(c + xa + ox) for c in cols)
+        ys = tuple(float(yc[c] + ya + oy) for c in cols)
+        line = int(np.abs(lines - ys[0]).argmin())
+        notes.append(Note(line, a + xa + ox - HEAD * st.L, e + xa + ox, xs, ys))
     return sorted(notes, key=lambda n: n.head)
 
 

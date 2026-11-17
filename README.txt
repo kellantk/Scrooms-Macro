@@ -34,7 +34,8 @@ KEYBINDS
 TIMING
   Latency and Note timing are learned automatically while it plays
   ("Auto-tune" in the Timing tab). Getting "Good" instead of "Perfect"
-  on strings/keys? Note timing: higher = press later.
+  on strings/keys? Note timing: higher = press later. The log (and
+  macro_log.txt) says how the game scored each strings/keys minigame.
 
 DISCORD ALERTS (optional)
   1. Discord: channel settings > Integrations > Webhooks > New Webhook > Copy URL.
