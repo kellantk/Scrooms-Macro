@@ -77,17 +77,28 @@ def load_settings():
     try:
         with open(SETTINGS) as f:
             data = json.load(f)
-        tuned_for = data.pop("tuned_for", "")
-        for k in UI_KEYS:
-            if k in data:
-                ui[k] = type(UI_KEYS[k])(data.pop(k))
-        for k, v in data.items():
-            if hasattr(cfg, k):
+        if not isinstance(data, dict):
+            raise ValueError("not a settings file")
+    except (OSError, ValueError):
+        return cfg, ui
+    tuned_for = data.pop("tuned_for", "")
+    for k, v in data.items():
+        # one odd value (a hand-edited file, an older version's) only costs
+        # that setting - it used to throw away every setting after it
+        try:
+            if v is None:
+                continue
+            if k in UI_KEYS:
+                ui[k] = type(UI_KEYS[k])(v)
+            elif hasattr(cfg, k):
                 setattr(cfg, k, type(getattr(cfg, k))(v))
-        if tuned_for != TUNED_FOR:
-            cfg.note_offset_ms = bot.Config().note_offset_ms
-    except (OSError, ValueError, TypeError):
-        pass
+        except (TypeError, ValueError):
+            pass
+    if tuned_for != TUNED_FOR:
+        cfg.note_offset_ms = bot.Config().note_offset_ms
+    cfg.latency_ms = max(0, min(300, cfg.latency_ms))
+    cfg.note_offset_ms = max(-150, min(150, cfg.note_offset_ms))
+    cfg.cooldown_s = max(0.0, min(60.0, cfg.cooldown_s))
     return cfg, ui
 
 
@@ -95,8 +106,26 @@ def save_settings(cfg, ui):
     try:
         data = asdict(cfg)
         data.pop("dry_run", None)
-        with open(SETTINGS, "w") as f:
+        # written next to the real file first: a crash or a power cut in the
+        # middle of saving can't leave half a settings file behind
+        with open(SETTINGS + ".tmp", "w") as f:
             json.dump({**data, **ui, "tuned_for": TUNED_FOR}, f, indent=2)
+        os.replace(SETTINGS + ".tmp", SETTINGS)
+    except OSError:
+        pass
+
+
+def trim_log(path, limit=4_000_000, keep=1_000_000):
+    """The log is only ever added to: once it's big, keep its last part
+    (weeks of running made it tens of MB - and bug reports with it)."""
+    try:
+        if os.path.getsize(path) <= limit:
+            return
+        with open(path, "rb") as f:
+            f.seek(-keep, os.SEEK_END)
+            tail = f.read()
+        with open(path, "wb") as f:
+            f.write(b"(older lines removed)\n" + tail[tail.find(b"\n") + 1:])
     except OSError:
         pass
 
@@ -609,6 +638,7 @@ class App:
             messagebox.showwarning(APP, "Your Discord user ID doesn't look right (it's a long number) - "
                                         "pings are off until it's fixed.")
         cfg.dry_run = dry
+        trim_log(os.path.join(BASE, "macro_log.txt"))
         self.status = bot.Status(log_path=os.path.join(BASE, "macro_log.txt"), debug_dir=os.path.join(BASE, "debug"))
         try:
             io = bot.WindowsIO()
@@ -618,8 +648,14 @@ class App:
         except Exception as e:   # mss / ctypes problems
             messagebox.showerror(APP, f"Couldn't start: {e}")
             return
+        in_the_way = self.keep_clear(io)
         self.bot = bot.Bot(cfg, io, self.status)
         self.bot.log(f"{APP} v{VERSION} " + ("test detection mode - nothing will be clicked" if dry else "started"))
+        if in_the_way is not None:
+            self.bot.log("Moved this window to the side: it was on top of the middle of the game, "
+                         "and the macro can't see what's under it")
+        if in_the_way:
+            self.bot.log("It still covers part of the game - unpin it (top right) if minigames get missed")
 
         def run():
             try:
@@ -631,6 +667,37 @@ class App:
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
         self.update_start_button(True)
+
+    def keep_clear(self, io):
+        """Pinned on top, this window hides what's under it - from the macro
+        too. Over the middle of the game that's the cast ring, the count-in
+        and the minigames (seen in bug reports: "Ring didn't appear" over and
+        over), so it steps aside before the macro starts. Returns None if it
+        wasn't in the way, else whether it still covers some of the middle."""
+        if not self.ui["pin_on_top"]:
+            return None
+        try:
+            gx, gy, gw, gh = io.client_rect()
+        except Exception:
+            return None
+        root = self.root
+        root.update_idletasks()
+        x, y = root.winfo_x(), root.winfo_y()
+        edge = max(0, root.winfo_rootx() - x)                      # the window frame's border
+        w = root.winfo_width() + 2 * edge
+        h = root.winfo_height() + (root.winfo_rooty() - y) + edge
+        a0, a1 = gx + gw / 2 - 0.42 * gh, gx + gw / 2 + 0.42 * gh  # the game's middle
+        if x + w <= a0 or x >= a1 or y + h <= gy or y >= gy + gh:
+            return None
+        left, _, right, _ = work_area()
+
+        def covers(nx):
+            return max(0, min(nx + w, a1) - max(nx, a0))
+        spots = [max(left, min(int(a0) - w, right - w)), max(left, min(int(a1), right - w))]
+        nx = min(spots, key=lambda o: (covers(o), abs(o - x)))
+        root.geometry(f"+{nx}+{y}")
+        root.update_idletasks()
+        return covers(nx) > 0
 
     def stop(self):
         if self.bot:
@@ -669,12 +736,13 @@ class App:
         self.l_detail.config(text=(st.detail or (idle if not running else ""))[:80],
                              fg=WARN if phase == "Stopped" and st.detail else MUTED)
         self.l_fps.config(text=f"{st.fps:.0f} fps" if running and st.fps else "")
-        up = time.time() - st.session_start if st.session_start else 0
+        up = (st.session_end or time.time()) - st.session_start if st.session_start else 0
         self.tiles["finished"].config(text=str(st.finished))
         self.tiles["casts"].config(text=str(st.casts))
         self.tiles["rate"].config(text=f"{st.finished / (up / 3600):.0f}" if up > 60 else "-")
         self.tiles["uptime"].config(text=notify.fmt_duration(up) if st.session_start else "-")
-        if running and self.bot is not None:
+        just_stopped = not running and self.b_start.base == BAD
+        if (running or just_stopped) and self.bot is not None:
             try:   # show the timing the bot has learned so far
                 if int(self.v_latency.get()) != self.bot.cfg.latency_ms:
                     self.v_latency.set(self.bot.cfg.latency_ms)
@@ -682,8 +750,9 @@ class App:
                     self.v_note_off.set(self.bot.cfg.note_offset_ms)
             except (tk.TclError, ValueError):
                 pass
-        if not running and self.b_start.base == BAD:
+        if just_stopped:
             self.update_start_button(False)
+            save_settings(self.cfg, self.ui)    # keep what it learned, also if the app is never closed properly
         if not self.ui["compact"]:
             self.draw_graph(st.graph if running else {})
         if self.log_win is not None and self.log_win.winfo_exists():
@@ -850,7 +919,10 @@ class App:
     # ---------------------------------------------------------- updates
     def _check_update(self, manual=False):
         newer, url = updater.check(VERSION)
-        self.root.after(0, lambda: self._show_update(newer, url, manual))
+        try:
+            self.root.after(0, lambda: self._show_update(newer, url, manual))
+        except (RuntimeError, tk.TclError):
+            pass            # the window was closed meanwhile
 
     def _show_update(self, newer, url, manual):
         if newer:
@@ -931,7 +1003,8 @@ class App:
                 for f in files:
                     if f.endswith("settings.json"):      # never share the webhook URL or your Discord ID
                         try:
-                            data = json.load(open(f))
+                            with open(f) as fh:
+                                data = json.load(fh)
                             for k in ("webhook_url", "discord_user_id"):
                                 data[k] = "(removed)" if data.get(k) else ""
                             z.writestr("settings.json", json.dumps(data, indent=2))
@@ -959,8 +1032,15 @@ class App:
         self._log_shown = None
 
     def quit(self):
+        was_running = self.running()
         self.stop()
         self.hk.stop()
+        if was_running:
+            # the macro's thread dies with the app: give it a moment to let go
+            # of a held key or mouse button first, and to send its last post
+            self.root.withdraw()
+            self.thread.join(1.5)
+            notify.flush(2.5)
         self.read_cfg(quiet=True)
         self.root.destroy()
 

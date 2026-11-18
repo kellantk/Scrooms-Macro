@@ -55,11 +55,13 @@ FIX_STEPS = (
 def run():
     if getattr(sys, "frozen", False):
         internal = getattr(sys, "_MEIPASS", os.path.join(_base(), "_internal"))
+        # (numpy 2 keeps its core in numpy\\_core and names its math library differently)
         needed = {
-            "numpy's math library (numpy.libs\\libopenblas...dll)": os.path.join(internal, "numpy.libs", "libopenblas*.dll"),
-            "numpy core (numpy\\core\\_multiarray_umath...pyd)": os.path.join(internal, "numpy", "core", "_multiarray_umath*.pyd"),
+            "numpy's math library (numpy.libs\\libopenblas...dll)": [os.path.join(internal, "numpy.libs", "*openblas*.dll")],
+            "numpy core (numpy\\core\\_multiarray_umath...pyd)": [os.path.join(internal, "numpy", d, "_multiarray_umath*.pyd")
+                                                                  for d in ("core", "_core")],
         }
-        missing = [name for name, pattern in needed.items() if not glob.glob(pattern)]
+        missing = [name for name, patterns in needed.items() if not any(glob.glob(pt) for pt in patterns)]
         if missing:
             _fail("files missing",
                   "Some files the app needs are missing:\n  - " + "\n  - ".join(missing) +

@@ -79,12 +79,25 @@ def send(url, embed, image=None, timeout=10, ping=None):
         return False, str(e)
 
 
+_sending = []       # posts on their way
+
+
 def send_async(url, embed, image=None, on_done=None, ping=None):
     def run():
         res = send(url, embed, image, ping=ping)
         if on_done:
             on_done(*res)
-    threading.Thread(target=run, daemon=True).start()
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    _sending[:] = [x for x in _sending if x.is_alive()] + [t]
+
+
+def flush(timeout=3.0):
+    """Wait (at most `timeout` s) for posts that are on their way - the app
+    is closing, and they'd be cut off."""
+    end = time.time() + timeout
+    for t in list(_sending):
+        t.join(max(0.0, end - time.time()))
 
 
 def fmt_duration(s):
@@ -126,6 +139,12 @@ def report_embed(stats, final=False, reason=None):
     per = stats.get("per_minigame") or {}
     lines = "\n".join(f"**{k}**: {v}" for k, v in sorted(per.items(), key=lambda kv: -kv[1])) or "nothing yet"
     rate = stats["finished"] / max(stats["uptime"] / 3600, 1e-9)
+    # how the game itself scored the strings and keys notes (its Perfect / Good / Miss labels)
+    sc = stats.get("scored") or {}
+    total = sum(sc.values())
+    scored = ([{"name": "Notes (strings & keys)", "inline": False,
+                "value": " - ".join(f"{sc[k]} {k.capitalize()}" for k in ("perfect", "good", "miss") if sc.get(k))
+                         + f"  ({100 * sc.get('perfect', 0) / total:.0f}% Perfect)"}] if total else [])
     return {
         "title": "Macro stopped" if reason else "Session report" + (" (stopped)" if final else ""),
         **({"description": reason} if reason else {}),
@@ -136,6 +155,6 @@ def report_embed(stats, final=False, reason=None):
             {"name": "Per hour", "value": f"{rate:.0f}", "inline": True},
             {"name": "Running for", "value": fmt_duration(stats["uptime"]), "inline": True},
             {"name": "By instrument", "value": lines, "inline": False},
-        ],
+        ] + scored,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

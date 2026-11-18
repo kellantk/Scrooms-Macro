@@ -87,7 +87,8 @@ MATRIX = [
     ("laggy input (60 ms)", {"input_ms": 60}),
     ("small window", {"size": (1024, 576)}),
     ("big window", {"size": (2560, 1080)}),
-    ("fast notes", {"opts": {"speed": 1.5}}),
+    ("fast notes (x1.5)", {"opts": {"speed": 1.5}}),
+    ("very fast notes (x3)", {"opts": {"speed": 3.0}}),
     ("on snow", {"scene": "snow"}),
     ("on sand", {"scene": "sand"}),
 ]

@@ -71,7 +71,12 @@ the zip it creates.
   its own. The bot steers the dot so the scroom stays centered in the box.
 
 Detection is based on contrast and shapes, not fixed colors or positions, so it handles
-different window sizes, rarer (purple) scrooms, dark areas and snow.
+different window sizes, rarer (purple) scrooms, dark areas and snow. Note speed isn't assumed
+either: it's measured in each minigame, so the much faster notes of rare scrooms are played the
+same way.
+
+The macro can't see what's under its own window when that's pinned on top of the game, so it
+moves out of the middle of the game when you press Start.
 
 What it touches on your PC: screenshots of the Roblox window only, mouse clicks (and mouse
 moves inside the game window for wind), your instrument's hotbar key and A/S/D/F, and one
@@ -111,6 +116,7 @@ pip install pillow
 python -m sim.run                          # all four minigames (a few minutes)
 python -m sim.run --matrix                 # ... under every condition (slow PC, 30/144 fps, snow...)
 python -m sim.run keys --fps 30 --loop 30  # one minigame, slow PC, 30 fps game
+python -m sim.run keys --speed 3           # a rare scroom's fast tiles
 python -m sim.run wind --shot wind.png     # save a frame to look at
 ```
 

@@ -200,7 +200,9 @@ def next_notes(img, ox, oy, hw, masks=None):
             top = k
             while top - 1 >= 0 and on[top - 1]:
                 top -= 1
-            if k - top >= 0.3 * r:
+            # (a bar that runs out of the top of the look window: its end
+            # isn't in view yet - the window's edge is not it)
+            if k - top >= 0.3 * r and top > 1:
                 bar_top[lane] = max(0, y_lo) + top + oy
         # lowest pill: last run of filled rows that is tall enough to be a
         # note (the slot outline's rounded top is a thin arc, not a note)
@@ -304,6 +306,7 @@ class StringsFinder:
         self.bar_near = {}      # lane -> hold bar coverage just above the circle
         self.bar_top = {}       # lane -> y of the far end of the bar at the circle
         self.marks = {}         # lane -> (note core y, circle lit 0..1), for note timing
+        self.present = False    # the highway was really there in the last read (not just remembered)
         self.label = None       # pixel counts of the verdict text ("Perfect"...) left of the highway
         self.label_size = 1.0
 
@@ -340,11 +343,14 @@ class StringsFinder:
                 if self.misses >= 90 and seen < 2:
                     self.hw = None
             if self.hw is None:
+                self.present = False
                 return None
             hw = self.hw          # brief miss (e.g. a hit flash): keep the last position
+            self.present = seen >= 2
         else:
             self.misses = 0
             self.hw = hw
+            self.present = True
         notes, self.holds, self.bar_near, self.bar_top = next_notes(img, ox, oy, hw, masks)
         if seen < 2:
             # the highway is (nearly) gone - the minigame is closing: whatever

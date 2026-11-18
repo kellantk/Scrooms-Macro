@@ -14,6 +14,8 @@ USE
   1. Open Roblox and stand where you fish, with no menus open.
   2. Press F6 (or click Start). The macro equips your instrument and starts
      casting. Press F6 again to stop.
+     (Start with the instrument put away. If it was already out, the macro
+     notices after three casts without a ring and takes it out again.)
   3. If you click out of Roblox, the macro lets go and pauses until you're back.
   The first time you use an instrument, click "Continue" on the game's
   tutorial yourself - the macro waits for it.
@@ -26,6 +28,9 @@ SUPPORTED INSTRUMENTS (Crescendo Valley update)
 WINDOW
   Pin (top right)    keeps the app on top of the game.
   Arrow (top right)  mini view: only the status and the Start button.
+  The macro can't see what's under its own pinned window: keep it at the
+  side of the game, not over the middle (it steps aside by itself when you
+  press Start).
 
 KEYBINDS
   Changed your strings/keys buttons in the game? Put the same keys in

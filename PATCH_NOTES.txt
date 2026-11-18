@@ -31,7 +31,46 @@ frame rates, PC speeds, input delays and sceneries.
   which keeps presses steady on slow PCs.
 - Keys and wind are found on snow and other bright scenery.
 - The log tells how the game scored strings and keys, e.g. "12 notes pressed:
-  11 Perfect, 1 Good".
+  11 Perfect, 1 Good". Discord session reports show the totals.
+- Count-in: the circle often wasn't found at all on small game windows
+  (1280x720 and smaller - its outline is hardly more than a pixel wide there)
+  and was found late on bigger ones, so the first rings, or all four, went by
+  unclicked. It's picked up as soon as it appears now, and its size is
+  measured to a fraction of a pixel: on a small window the Perfect click is
+  only a couple of pixels wide, and clicks came up to 50 ms late there.
+  One misread ring can't send a click at an odd moment any more.
+- Fast scrooms: when tiles fell more than about twice as fast as a common
+  scroom's, keys stopped pressing altogether (it took them for the board's
+  closing animation). All four minigames were tested with notes up to three
+  times faster (keys, strings and percussion up to four times).
+- No key stays down after a minigame: when the catch is complete in the
+  middle of a hold note, the key goes up as soon as the board starts closing
+  (a held A/S/D walks the character). Same when you click into another window
+  or close the app while it plays. And no key is pressed for a note that's
+  left over while the strings highway or the keys board closes.
+- The macro's own window: pinned on top of the middle of the game, it hid the
+  cast ring, the count-in and the minigames from the macro too ("Ring didn't
+  appear", "No minigame showed up"). It now steps aside when you press Start,
+  and the log says so when it's in the way. Unpinned, it no longer blanks out
+  a piece of the game.
+- "Ring didn't appear" three casts in a row: the macro presses the instrument
+  key (the instrument wasn't in hand - it was already out when the macro
+  started, or the game put it away).
+- Fixed: memory use creeping up during a long session.
+- Fixed: keys hold notes let go late on big windows; hold notes on fast
+  scrooms let go late.
+- Fixed: a press coming late after a stutter right before it, a fast note
+  skipped after a stutter, and a press coming late when a hold note in
+  another lane ended at the same moment.
+- Faster: keys are read about 40% faster, and the search for the count-in and
+  the minigame after a cast takes a third of the time.
+- Count-in: gives up after a few seconds without rings instead of sitting
+  there for 12, and aims at the middle of where clicks got the yellow dot on
+  recordings (a little further out than before).
+- App: the "Running" and "Per hour" tiles stop when the macro stops; what it
+  learned (latency, note timing) is saved when it stops, not only when the
+  app is closed; one damaged value in settings.json no longer resets all
+  settings.
 
 v2.0.2
 ------

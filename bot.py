@@ -76,6 +76,8 @@ class Status:
     finished: int = 0             # minigames played to the end
     per_minigame: dict = field(default_factory=dict)
     session_start: float = 0.0
+    session_end: float = 0.0      # 0 while it's running
+    scored: dict = field(default_factory=dict)   # the game's own verdicts this session: perfect / good / miss
     graph: dict = field(default_factory=dict)    # live data for the app's graph
 
 
@@ -166,6 +168,26 @@ class Motion:
         """The rate the notes share - once two of them have shown it."""
         return float(np.median(self.rates)) if len(self.rates) >= 2 else None
 
+    def speed(self):
+        """How fast the notes are at the hit spot, px/s (rarer scrooms: faster)."""
+        k = self.rate() or self.rate0
+        return k if self.yv is None else k / self.u_target ** 2
+
+    @staticmethod
+    def _slope(t, u):
+        """How fast u climbs: the middle one of the slopes between pairs of
+        readings (a straight fit is bent by a few readings that don't belong
+        - the picture jumping when the game comes out of a pause, seen on a
+        recording - and the first note was then pressed 80 ms early)."""
+        if len(t) > 24:
+            pick = np.unique(np.linspace(0, len(t) - 1, 24).astype(int))
+            t, u = t[pick], u[pick]
+        dt = t[None, :] - t[:, None]
+        far = dt >= max(0.03, 0.25 * (t[-1] - t[0]))
+        if not far.any():
+            return float(np.polyfit(t, u, 1)[0])
+        return float(np.median((u[None, :] - u[:, None])[far] / dt[far]))
+
     def _line(self, samples):
         """(rate, u at the last reading) of one note."""
         t = np.array([s[0] for s in samples])
@@ -175,8 +197,8 @@ class Motion:
         if k is None:
             k = self.rate0
             if len(t) >= 3 and t[-1] - t[0] >= 0.08:
-                kf = float(np.polyfit(t, u, 1)[0])
-                if 0.3 * self.rate0 < kf < 4 * self.rate0:
+                kf = self._slope(t, u)
+                if 0.25 * self.rate0 < kf < 6 * self.rate0:
                     k = kf
         res = u - k * t
         c = float(np.mean(res))
@@ -205,8 +227,8 @@ class Motion:
             return
         t = np.array([s[0] for s in samples])
         u = np.array([self.u(s[1]) for s in samples])
-        k = float(np.polyfit(t - t[-1], u, 1)[0])
-        if not 0.3 * self.rate0 < k < 4 * self.rate0:
+        k = self._slope(t - t[-1], u)
+        if not 0.25 * self.rate0 < k < 6 * self.rate0:
             return
         if self.rates and abs(k - np.median(self.rates)) > 0.15 * np.median(self.rates):
             self.rates.clear()            # the notes changed speed: start over
@@ -217,8 +239,9 @@ def commit_ahead(frame_dt):
     """How far ahead of its moment a press is handed to the precise timer.
     Deciding only on the very last screen read meant one slow read (another
     program hogging the PC for 50 ms) made the press late; a little earlier,
-    the wait is then timed exactly and nothing can get in between."""
-    return max(2.5 * frame_dt, 0.03)
+    the wait is then timed exactly and nothing can get in between. (45 ms:
+    with 30, a stall right before a press still made one press in ~25 late.)"""
+    return max(2.5 * frame_dt, 0.045)
 
 
 # strings: where to land a press, as "the circle lights up this long after the
@@ -390,6 +413,7 @@ class Bot:
         self._last_shot = {}
         self._hold_start = None
         self._last_repress = -9.0
+        self.no_ring = 0               # casts in a row that brought no ring
         self.stop_event = threading.Event()
         self.ring_finder = detect.RingFinder()
         self.freq_finder = detect.FreqFinder()
@@ -498,8 +522,8 @@ class Bot:
 
     # ------------------------------------------------- results / discord
     def stats(self):
-        return {"finished": self.st.finished, "casts": self.st.casts,
-                "uptime": time.time() - (self.st.session_start or time.time()),
+        return {"finished": self.st.finished, "casts": self.st.casts, "scored": dict(self.st.scored),
+                "uptime": (self.st.session_end or time.time()) - (self.st.session_start or time.time()),
                 "per_minigame": dict(self.st.per_minigame)}
 
     def webhook_on(self):
@@ -512,6 +536,7 @@ class Bot:
         self.st.per_minigame[name] = self.st.per_minigame.get(name, 0) + 1
         self._last_progress = time.time()
         self._stuck_alerted = False
+        self.no_ring = 0
         self.st.graph = {}
         self.set_phase("Cooldown")
         t0 = self.io.now()
@@ -563,6 +588,15 @@ class Bot:
         if now - self._last_report >= 60 * self.cfg.report_minutes:
             self._last_report = now
             notify.send_async(self.cfg.webhook_url, notify.report_embed(self.stats()))
+
+    def view_hint(self):
+        """Something wasn't found: if this program's own window lies over the
+        game, say so - the macro can't see through it."""
+        cover = getattr(self.io, "own_cover", None)
+        if cover is not None and cover() > 0.01:
+            self.log("  (the macro's window is on top of the game - move it to a side, or unpin it)")
+            return True
+        return False
 
     def look(self, finder):
         w, h = self.io.client_size()
@@ -620,7 +654,7 @@ class Bot:
     # --------------------------------------------------------------- main
     def run(self):
         self.stop_event.clear()
-        self.st.session_start = time.time()
+        self.st.session_start, self.st.session_end = time.time(), 0.0
         self._last_report = self._last_progress = time.time()
         self.stop_reason = None
         try:
@@ -652,13 +686,20 @@ class Bot:
         finally:
             self.hold(False)
             self.st.graph = {}
+            self.st.session_end = time.time()
             self.maybe_report(final=True)
             self.set_phase("Stopped", self.stop_reason or "")
 
     def cycle(self):
         """One cast -> ring -> (count-in) -> minigame attempt."""
         import gc
-        gc.disable()          # a collection pause in the middle of a note costs a press
+        # A collection pause in the middle of a note costs a press, so Python's
+        # garbage collector is off while a cast is played - and run by hand
+        # here, between casts, where a few ms don't matter. (Only switching it
+        # back on between casts wasn't enough: it never got to run, and memory
+        # crept up over a long session.)
+        gc.collect()
+        gc.disable()
         try:
             self._cycle()
         finally:
@@ -732,6 +773,7 @@ class Bot:
             self.io.sleep(0.02)
         self.snapshot("freq-not-found")
         self.log("No minigame showed up - recasting")
+        self.view_hint()
 
     def after_freq(self):
         t0 = self.io.now()
@@ -765,6 +807,7 @@ class Bot:
         targets = deque(maxlen=15)
         loop_dt = deque(maxlen=10)
         prev_t = None
+        checked = t0
         while not self.stopped():
             self.wait_focus()
             now = self.io.now()
@@ -779,11 +822,27 @@ class Bot:
                 if last_seen is None and now - t0 > 3.5:
                     self.snapshot("ring-not-found")
                     self.log("Ring didn't appear - recasting")
+                    hidden = self.view_hint()
+                    self.no_ring += 1
+                    if self.no_ring >= 3 and self.cfg.equip_key and not self.cfg.dry_run and not hidden:
+                        # three casts in a row and no ring: the instrument isn't
+                        # in hand (it was already out when the macro pressed its
+                        # key at the start, or the game put it away)
+                        self.no_ring = 0
+                        self.log(f"No ring 3 casts in a row - pressing the instrument key ({self.cfg.equip_key})")
+                        self.wait_focus()
+                        self.io.key(self.cfg.equip_key)
+                        self.io.sleep(0.8)
                     return False
-                if self.minigame_up():
-                    return True
+                # (looking for all five minigames costs several screen reads:
+                # only now and then, or the ring itself is spotted late)
+                if now - checked > 0.4:
+                    checked = now
+                    if self.minigame_up():
+                        return True
                 self.io.sleep(0.01)
                 continue
+            self.no_ring = 0
             last_seen = now
             if first_seen is None:
                 first_seen = now
@@ -819,15 +878,14 @@ class Bot:
                 diff += 2 * math.pi
             t_hit = diff / abs(omega)
             frame_dt = max(sum(loop_dt) / len(loop_dt), 0.008) if loop_dt else 0.03
-            wait = t_hit - lat
+            t_go = now + t_hit - lat
             # too late to land this pass on the target (the click needs `lat`
-            # to get there)? Then it's the next lap, ~1.2 s on: clicking anyway
-            # landed 30-70 ms past the Perfect part.
-            if wait < -(0.012 if self.cfg.aim_perfect else 0.05):
-                wait += 2 * math.pi / abs(omega)
-            if wait <= commit_ahead(frame_dt):
-                if wait > 0:
-                    self.io.wait_until(now + wait)   # precise, not a coarse sleep
+            # to get there, and this read took a while too)? Then it's the next
+            # lap, ~1.2 s on: clicking anyway landed 30-70 ms past the Perfect part.
+            if t_go < self.io.now() - (0.012 if self.cfg.aim_perfect else 0.05):
+                t_go += 2 * math.pi / abs(omega)
+            if t_go - self.io.now() <= commit_ahead(frame_dt):
+                self.io.wait_until(t_go)             # precise, not a coarse sleep
                 self.click()
                 t_click = self.last_click_t if not self.cfg.dry_run else self.io.now()
                 at_click = phase + omega * (t_click - t0)
@@ -961,6 +1019,8 @@ class Bot:
         loop_dt = deque(maxlen=10)
         prev_t = None
         t_start = self.io.now()
+        alive = t_start               # last time a ring was seen shrinking
+        far = 0                       # reads in a row with a ring further out in front
         target, r0_seen = 0.0, 1.0
 
         def arrival(now, target):
@@ -996,6 +1056,12 @@ class Bot:
         while not self.stopped() and self.io.now() - t_start < 12:
             self.wait_focus()
             now = self.io.now()
+            if now - alive > (3.0 if clicks else 6.0):
+                # a circle and no ring anywhere for this long: the count-in is
+                # over (or this isn't it) - don't sit here while the minigame
+                # starts. (A ring that's there but standing still is the game's
+                # first-time tutorial: that one is waited for.)
+                break
             if prev_t is not None:
                 loop_dt.append(now - prev_t)
             prev_t = now
@@ -1022,6 +1088,21 @@ class Bot:
             target = countin.PERFECT * res.r0
             r0_seen = res.r0
             r = res.ring
+            if r is not None:
+                alive = now
+            if r is not None and tr.x is not None:
+                # one bad read mustn't make two rings out of one, or mix two
+                # into one (that sent a click at an odd moment): a ring further
+                # out has to be there in two reads in a row before it's taken
+                # for the next one, and nothing moves inward faster than a ring
+                if r > tr.x + 0.2 * res.r0:
+                    far += 1
+                    if far < 2:
+                        r = None
+                else:
+                    far = 0
+                    if r < tr.x - (0.1 + 4.0 * (now - tr.samples[-1][0])) * res.r0:
+                        r = None
             if r is not None:
                 new = tr.x is not None and r > tr.x + 0.2 * res.r0
                 if done and not new and r <= clicked_r + 3:
@@ -1093,10 +1174,10 @@ class Bot:
         self.set_phase(name, "notes coming")
         self.log(f"{name} minigame")
         kb = (keybinds or "").replace(" ", "").lower()
-        ok = len(kb) == len(lanes) and all(c in SCANCODES for c in kb)
+        ok = len(kb) == len(lanes) and len(set(kb)) == len(kb) and all(c in SCANCODES for c in kb)
         km = {lane: (kb[i] if ok else lane) for i, lane in enumerate(lanes)}
         if keybinds and not ok:
-            self.log(f"{name}: keybinds '{keybinds}' aren't {len(lanes)} letter keys - using {''.join(lanes)}")
+            self.log(f"{name}: keybinds '{keybinds}' aren't {len(lanes)} different keys - using {''.join(lanes)}")
         src = finder or hold_src               # where hold bars and the verdict labels are read
         timer = NoteTimer(lanes) if finder is not None and hasattr(finder, "marks") else None
         tuned = 0                              # timer.errors already used for tuning
@@ -1116,11 +1197,31 @@ class Bot:
         to_judge = []                                    # [press time, best label, its strength]
         label_base = None                                # label colors the scenery alone has
         gone_since = None
+        seen_t = self.io.now()                           # last read with the lanes really standing there
+        geo = deque()                                    # (time, size, height) of the lanes over the last second
+        away_t = back_t = None                           # since when they're not / again where they were
+        closing = False                                  # they've been away long enough: the minigame is closing
         loop_dt = deque(maxlen=10)
         prev_t = None
         presses = 0
+
+        def let_go():
+            """The minigame went away with a key still down (the catch was
+            complete in the middle of a hold note). A/S/D walk the character
+            for as long as they're held, so up they go."""
+            for lane in list(holding):
+                if not self.cfg.dry_run:
+                    self.io.key_up(km[lane])
+                del holding[lane]
+
         try:
             while not self.stopped():
+                if (holding or release_at) and not self.io.focused():
+                    # you've clicked into another window: no key stays down there
+                    let_go()
+                    for k in list(release_at):
+                        self.io.key_up(km[k])
+                        del release_at[k]
                 self.wait_focus()
                 now = self.io.now()
                 for k, t_up in list(release_at.items()):
@@ -1133,6 +1234,8 @@ class Bot:
                 res = look()
                 if res is None:
                     gone_since = gone_since or now
+                    if holding and now - seen_t > 0.3:
+                        let_go()
                     # 2.5 s: rides out the first-time tutorial screen and hit flashes
                     if now - gone_since > 2.5:
                         break
@@ -1140,6 +1243,46 @@ class Bot:
                     continue
                 gone_since = None
                 hw, notes = res
+                # The lanes stand still while notes come. A finder keeps giving
+                # their last position for a while after they've gone (a flash
+                # can hide them for a moment) and says so with present = False:
+                # when that lasts, the minigame is closing.
+                present = getattr(src, "present", True)
+                # Closing, the whole thing swells for a quarter of a second and
+                # then collapses, with the notes left on it (seen on recordings:
+                # the strings highway grows by a fifth, the keys board by an
+                # eighth). A finder can follow it through that - so "standing
+                # there" also means: the size and height it has had lately.
+                geo.append((now, hw.r, hw.cy))
+                while now - geo[0][0] > 1.0:
+                    geo.popleft()
+                if len(geo) >= 5:
+                    r_ref = float(np.median([g[1] for g in geo]))
+                    if abs(hw.r - r_ref) > 0.07 * r_ref or abs(hw.cy - float(np.median([g[2] for g in geo]))) > 0.25 * r_ref:
+                        present = False
+                # (collapsing, it passes through its normal size again for a
+                # frame or two: once it has been away for a moment, it only
+                # counts as back when it has stayed back)
+                if not present:
+                    back_t = None
+                    away_t = now if away_t is None else away_t
+                    closing = closing or now - away_t >= 0.12
+                elif closing:
+                    back_t = now if back_t is None else back_t
+                    if now - back_t >= 0.2:
+                        closing, away_t, back_t = False, None, None
+                    else:
+                        present = False
+                else:
+                    away_t = None
+                if present:
+                    seen_t = now
+                elif now - seen_t > 0.3:
+                    if holding:
+                        let_go()
+                    for tr in track.values():
+                        tr.reset()
+                    armed.clear()
                 if finder is not None:
                     # the highway never moves while notes come; if it changes size
                     # it's closing (end of the minigame): drop the notes we follow
@@ -1159,6 +1302,8 @@ class Bot:
                     motion_at = (hw.cy, hw.r)
                     if timer is not None:
                         timer.motion = motion
+                # how fast the notes of this scroom really are (rarer ones: a lot faster)
+                v_ref = max(v_default, motion.speed())
                 if timer is not None:
                     timer.update(finder.marks, hw.cy, hw.r, now)
                     if len(timer.errors) - tuned >= 4:
@@ -1187,6 +1332,7 @@ class Bot:
                 # (keys: the bar sits on top of its tile, so its end is "there"
                 # half a tile before the key's middle)
                 hold_end = getattr(hw, "hold_end", 0.0)
+                ups = []                               # (time, lane): held keys to let go this round
                 for lane, h in list(holding.items()):
                     bt = bar_top.get(lane)
                     ends = h[2]
@@ -1206,14 +1352,9 @@ class Bot:
                     if now - h[0] > 8.0:
                         t_up = now
                     if t_up is not None and t_up - now <= ahead and now - h[0] > 0.12:
-                        if t_up > now:
-                            self.io.wait_until(t_up)
-                        if not self.cfg.dry_run:
-                            self.io.key_up(km[lane])
-                        del holding[lane]
-                        track[lane].reset()
+                        ups.append((t_up, lane))
                 upcoming = {}
-                due = []                               # (press time, lane, y)
+                due = []                               # (press time, lane, y, armed?)
                 for i, lane in enumerate(lanes):
                     if lane in holding:
                         continue
@@ -1224,7 +1365,13 @@ class Bot:
                         # hides them) - keep going on where it must be by now
                         # (strings: only one that vanished next to the circle - one
                         # vanishing far up the lane is gone, not hidden)
-                        near = finder is None or (tr.x is not None and tr.x > hw.cy - 3 * hw.r)
+                        # (...or one that was further up a moment ago and, fast
+                        # as it is, must be under the outline by now: after a
+                        # slow read, a fast note has gone from one to the other)
+                        near = finder is None or (tr.x is not None and (
+                            tr.x > hw.cy - 3 * hw.r
+                            or (now - tr.samples[-1][0] < 0.12 and len(tr.samples) >= 3
+                                and motion.pos(tr.samples, now) > hw.cy - 1.8 * hw.r)))
                         if tr.x is not None and len(tr.samples) >= 2 and now - tr.samples[-1][0] < 0.4 and near:
                             y = motion.pos(tr.samples, now)
                             if y > hw.cy + hw.r:          # long past the hit spot: it's gone
@@ -1257,11 +1404,18 @@ class Bot:
                     else:
                         higher[lane] = 0
                         if (not predicted and tr.x is not None
-                                and y > tr.x + 2 * hw.r + 1.5 * v_default * (now - tr.samples[-1][0])):
+                                and y > tr.x + 2 * hw.r + 1.5 * v_ref * (now - tr.samples[-1][0])):
                             # lower than the note we follow can have got: another
                             # one (the note already armed showing again)
                             if lane in armed:
                                 continue
+                            tr.reset()
+                        elif (not predicted and tr.x is not None
+                              and y - tr.x > 7.5 * v_ref * (now - tr.samples[-1][0]) + 4 + 0.1 * hw.r):
+                            # ...or further than any note gets between two reads:
+                            # the picture jumped (the game coming out of a pause,
+                            # seen on a recording). What was read before the jump
+                            # says nothing about where this note is going.
                             tr.reset()
                     # still the note we already pressed for? ignore it until it's
                     # gone. It is the one that's where that note must be by now -
@@ -1284,11 +1438,18 @@ class Bot:
                         # keys tiles fall at one steady speed. When the minigame
                         # ends, the closing board drags the leftover tiles up and
                         # then flings them down: pressing for those walks the
-                        # character (A/S/D move it)
-                        old = next((s for s in reversed(tr.samples) if now - s[0] >= 0.08), None)
+                        # character (A/S/D move it). "Flung" is judged against how
+                        # this scroom's tiles have been falling - a rare scroom's
+                        # are several times faster than a common one's, and a
+                        # fixed limit took those for flung ones: no key at all.
+                        old = next((q for q in reversed(tr.samples) if now - q[0] >= 0.08), None)
                         if old is not None:
                             sp = (y - old[1]) / (now - old[0])
-                            if sp > 2.2 * v_default or sp < -0.3 * v_default:
+                            usual = motion.rate()
+                            if usual is None and old[0] - tr.samples[0][0] >= 0.12:
+                                usual = (old[1] - tr.samples[0][1]) / (old[0] - tr.samples[0][0])
+                            fast = 2.2 * usual if usual is not None and usual > 0.25 * v_default else 8 * v_default
+                            if sp > fast or sp < -0.3 * v_default:
                                 blocked[lane] = now + 0.8
                                 tr.reset()
                                 continue
@@ -1307,12 +1468,35 @@ class Bot:
                         del armed[lane]
                     elif a[0] - now - lat <= ahead:
                         due.append((a[0] - lat, lane, a[1], True))
-                # the board isn't on screen in this read (the minigame is closing):
-                # a key pressed now would walk the character (A/S/D move it)
+                # the lanes aren't where they were in this read (the minigame is
+                # closing): a key pressed now would walk the character
+                if not present:
+                    due = []
                 due = [d for d in due if now >= blocked.get(d[1], 0.0)]
-                for t_press, lane, y, was_armed in sorted(due):
-                    if t_press > self.io.now():
-                        self.io.wait_until(min(t_press, now + ahead + 0.01))
+                # key-downs and key-ups of this round in the order of their
+                # moments (a hold's release used to be waited for first, which
+                # made a note due in another lane meanwhile late)
+                events = [(t, 1, lane, float(y), a) for t, lane, y, a in due] + [(t, 0, lane, 0.0, False) for t, lane in ups]
+                pressed_now = set()
+                for t_ev, down, lane, y, was_armed in sorted(events):
+                    if not down:
+                        if lane not in holding:
+                            continue
+                        if t_ev > self.io.now():
+                            self.io.wait_until(min(t_ev, now + ahead + 0.01))
+                        if not self.cfg.dry_run:
+                            self.io.key_up(km[lane])
+                        del holding[lane]
+                        track[lane].reset()
+                        continue
+                    if was_armed:
+                        if lane not in armed:
+                            continue
+                    elif lane in pressed_now and y >= motion.pos(done_s[lane], t_ev) - 1.2 * hw.r:
+                        track[lane].reset()        # the note that got its press a moment ago (it was armed)
+                        continue
+                    if t_ev > self.io.now():
+                        self.io.wait_until(min(t_ev, now + ahead + 0.01))
                     tp = self.io.now()
                     if was_armed:
                         _, _, hold, readings = armed.pop(lane)
@@ -1333,6 +1517,7 @@ class Bot:
                     if hold:
                         holding[lane] = [tp, 0, Tracker(window=1.5), None]
                     presses += 1
+                    pressed_now.add(lane)
                     to_judge.append([tp, None, 0])
                     done_s[lane], done_t[lane] = (readings or [(tp, y)]), tp
                     motion.learn(readings)
@@ -1346,6 +1531,8 @@ class Bot:
             if j[1]:
                 verdicts[j[1]] += 1
         said = ", ".join(f"{n} {k.capitalize()}" for k, n in verdicts.items() if n)
+        for k, n in verdicts.items():
+            self.st.scored[k] = self.st.scored.get(k, 0) + n
         self.log(f"{name} minigame finished ({presses} notes pressed" + (f": {said})" if said else ")"))
         if timer is not None and timer.errors:
             e = timer.errors
@@ -1436,8 +1623,12 @@ class Bot:
                                 continue
                             shifts = [getattr(p, k) - a for p in past[0][1]
                                       if sx + 0.07 * L < getattr(p, k) < right]
-                            shifts = [d for d in shifts if 0.15 * L * dt < d < 1.2 * L * dt]
-                            if shifts:
+                            # (0.43 staff lengths a second on common scrooms; rarer ones are faster)
+                            shifts = [d for d in shifts if 0.15 * L * dt < d < 3.0 * L * dt]
+                            # (once it's known, a reading far off it isn't the notes'
+                            # speed: the staff closing flings what's left across it)
+                            if shifts and (len(speeds) < 8
+                                           or abs(min(shifts) / dt - np.median(speeds)) < 0.35 * np.median(speeds)):
                                 speeds.append(min(shifts) / dt)
                 v = float(np.median(speeds)) if len(speeds) >= 3 else 0.43 * L
                 # ---- turn readings into time windows: when the note's head gets
@@ -1583,6 +1774,10 @@ class Bot:
         gl = {"L": ["L"], "R": ["R"], "B": ["L", "R"]}
         try:
             while not self.stopped():
+                if release_at and not self.io.focused():
+                    for btn in list(release_at):         # no button stays down in another window
+                        self.io.button_up(btn)
+                        del release_at[btn]
                 self.wait_focus()
                 now = self.io.now()
                 for btn, t_up in list(release_at.items()):
@@ -1630,7 +1825,7 @@ class Bot:
                             kind = None
                     else:
                         far_reads = 0
-                        if back > 0.05 * lane.L + 1.5 * v_default * (now - tr.samples[-1][0]):
+                        if back > 0.05 * lane.L + 1.5 * max(v_default, motion.speed()) * (now - tr.samples[-1][0]):
                             # further left than the note we follow can have got:
                             # another one (the note already armed showing again)
                             if armed is not None:
@@ -1677,7 +1872,10 @@ class Bot:
                         upcoming[g].append((n[0] - lane.target_x) / v_default)
                 self.st.graph = {"mode": "lanes", "name": "Percussion", "lanes": ["L", "R"], "labels": ["Left", "Right"],
                                  "notes": upcoming, "presses": list(self.press_log), "now": now}
+                same_note = False                 # the note being followed just got its (armed) click
                 for t_click, knd, readings, x_now, was_armed in sorted(due, key=lambda d: d[0]):
+                    if (was_armed and armed is None) or (not was_armed and same_note):
+                        continue
                     if t_click > self.io.now():
                         self.io.wait_until(min(t_click, now + ahead + 0.01))
                     tc = self.io.now()
@@ -1697,6 +1895,7 @@ class Bot:
                         if tr.x is not None and -tr.x <= done_x + 0.03 * lane.L:
                             tr.reset()                    # those were this note's readings
                             kind = None
+                            same_note = True
                     else:
                         tr.reset()
                         kind = None
@@ -1874,6 +2073,7 @@ if user32 is not None:   # window handles as plain ints everywhere, so compariso
     user32.GetForegroundWindow.restype = ctypes.c_void_p
     user32.GetAncestor.restype = ctypes.c_void_p
     user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
 
 def make_dpi_aware():
@@ -2061,7 +2261,11 @@ class WindowsIO:
         return a
 
     def _own_rects(self):
-        """Screen rects of this program's visible windows (refreshed twice a second)."""
+        """Screen rects of this program's windows that are on top of the game
+        (refreshed twice a second). Only always-on-top ones can be: the macro
+        runs while Roblox is the active window, which puts it in front of
+        every ordinary window - blanking those too took a piece of the game
+        out of view for nothing."""
         now = time.perf_counter()
         if now - getattr(self, "_own_t", -9.0) < 0.5:
             return self._own
@@ -2070,7 +2274,8 @@ class WindowsIO:
 
         @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         def cb(hwnd, _):
-            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+            if (user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd)
+                    and user32.GetWindowLongW(hwnd, -20) & 0x8):          # WS_EX_TOPMOST
                 p = ctypes.c_ulong(0)
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
                 if p.value == pid:
@@ -2086,6 +2291,20 @@ class WindowsIO:
             rects = []
         self._own, self._own_t = rects, now
         return rects
+
+    def own_cover(self):
+        """How much of the game's middle (where the ring, the count-in and
+        the minigames show up) this program's own windows cover, 0..1."""
+        try:
+            x, y, w, h = self.client_rect()
+        except RuntimeError:
+            return 0.0
+        a0, a1 = x + w / 2 - 0.42 * h, x + w / 2 + 0.42 * h
+        b0, b1 = y + 0.1 * h, y + 0.97 * h
+        area = 0.0
+        for l, t, r, b in self._own_rects():
+            area += max(0.0, min(r, a1) - max(l, a0)) * max(0.0, min(b, b1) - max(t, b0))
+        return min(1.0, area / max(1.0, (a1 - a0) * (b1 - b0)))
 
     # input ----------------------------------------------------------
     def mouse_down(self):

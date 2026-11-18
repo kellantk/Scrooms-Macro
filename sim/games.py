@@ -152,12 +152,14 @@ class CountIn(Stage):
     def __init__(self, w, h, bg, rng, speed=None, gap=None, n=4, glow=True):
         super().__init__(w, h, bg, rng)
         self.r0 = 0.0705 * h
-        self.cx, self.cy = 0.5 * w, 0.5 * h
+        # (not dead center: the search for it works on a grid, and a thin
+        # outline must be found wherever it falls between the grid's points)
+        self.cx, self.cy = 0.5 * w + float(rng.uniform(-9, 9)), 0.5 * h + float(rng.uniform(-9, 9))
         self.speed = (speed if speed is not None else float(rng.uniform(1.0, 1.45))) * self.r0
         self.gap = gap if gap is not None else float(rng.uniform(0.47, 0.66))
         self.n, self.glow = n, glow
         self.r_start = 2.3 * self.r0
-        self.target = 1.02 * self.r0        # Perfect: the ring lying on the circle (seen on recordings)
+        self.target = 1.04 * self.r0        # Perfect: the ring lying on the circle (1.0-1.08 radii on recordings)
         self.rings = []
         self.clicks = []
 
@@ -186,7 +188,7 @@ class CountIn(Stage):
         r["hit"] = t
         err = (t - r["T"]) * 1000
         off = abs(err) / 1000 * self.speed / self.r0          # how far the ring was from the circle, in radii
-        r["verdict"] = "perfect" if off <= 0.06 else "good" if off <= 0.15 else "miss"
+        r["verdict"] = "perfect" if off <= 0.04 else "good" if off <= 0.11 else "miss"
         self.results.append({"stage": "countin", "err": err, "verdict": r["verdict"]})
 
     def close(self):
@@ -196,19 +198,30 @@ class CountIn(Stage):
 
     def dynamic(self, d, img, ox, oy, t):
         r0, cx, cy = self.r0, self.cx - ox, self.cy - oy
-        lw = max(2, int(round(self.h / 480)))
         grow = min(1.0, 0.6 + 0.4 * (t - self.t0) / 0.3)           # the circle grows in
         r = r0 * grow
         last = max((c for c in self.clicks if c <= t), default=None)
         if last is not None and t < last + 0.18:                   # the click's flash hides it all
             d.ellipse([cx - 1.7 * r0, cy - 1.7 * r0, cx + 1.7 * r0, cy + 1.7 * r0], fill=(252, 252, 252))
             return
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(18, 40, 24), outline=WHITE, width=lw)
+        # The circle and the rings are thin, soft lines, as on recordings: about
+        # 1.6 px wide on a 720p window (one or two pixels of it bright enough
+        # to count as white). Drawn 3x bigger and scaled down for that.
+        S = 3
+        W, H = img.size
+        lines = Image.new("L", (W * S, H * S), 0)
+        dl = ImageDraw.Draw(lines)
+        wl = max(2, int(round(self.h / 450 * S)))
+
+        def circle(rad, width=wl):                                 # a line whose middle is `rad` from the center
+            ro = rad * S + width / 2
+            dl.ellipse([cx * S - ro, cy * S - ro, cx * S + ro, cy * S + ro], outline=255, width=int(width))
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(18, 40, 24))
+        circle(r)
         bad = [r["hit"] for r in self.rings if r["hit"] is not None and r["hit"] <= t and r.get("verdict") != "perfect"]
         if self.glow and bad and t < max(bad) + 0.65:
             # ...and for a moment after, the circle is puffed up and glowing
-            ro = 1.16 * r0
-            d.ellipse([cx - ro, cy - ro, cx + ro, cy + ro], outline=WHITE, width=max(lw, int(0.17 * r0)))
+            circle(1.08 * r0, 0.17 * r0 * S)
         d.ellipse([cx - 0.42 * r, cy - 0.5 * r, cx + 0.42 * r, cy + 0.45 * r], fill=WHITE)      # the scroom icon
         bx, by = cx + 0.71 * r, cy + 0.71 * r
         d.ellipse([bx - 0.26 * r, by - 0.26 * r, bx + 0.26 * r, by + 0.26 * r], fill=WHITE, outline=(0, 0, 0))
@@ -222,7 +235,8 @@ class CountIn(Stage):
                 continue
             rr = self.r_start - self.speed * (t - ring["spawn"])
             if rr > 0.99 * r0:
-                d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=WHITE, width=lw)
+                circle(rr)
+        img.paste(WHITE, mask=lines.resize((W, H), Image.BOX))
 
 
 # ------------------------------------------------------- shared: notes
@@ -281,9 +295,11 @@ class LaneGame(Stage):
 
     def close(self):
         for n in self.notes:
+            if n["T"] > self.t_close:
+                continue                                  # cut short before this one came
             if n["hit"] is None and not n.get("ghost"):
                 self.results.append({"stage": self.name, "err": None, "verdict": "miss", "hold": n["hold"] > 0})
-            elif n["hold"] > 0 and n["hit"] is not None and n["up"] is None:
+            elif n["hold"] > 0 and n["hit"] is not None and n["up"] is None and n["T"] + n["hold"] <= self.t_close:
                 self.results.append({"stage": self.name + "-release", "err": None, "verdict": "miss"})
 
     def last_time(self):
@@ -302,8 +318,10 @@ class Strings(LaneGame):
     windows = (0.05, 0.11, 0.15)
     COLORS = ((64, 214, 116), (236, 92, 104), (246, 214, 70))
 
-    def __init__(self, w, h, bg, rng, speed=1.0, n=12, holds=0.2, chords=0.1, ghost=True, keys=None, notes=None):
+    def __init__(self, w, h, bg, rng, speed=1.0, n=12, holds=0.2, chords=0.1, ghost=True, keys=None, notes=None,
+                 cut_at=None):
         super().__init__(w, h, bg, rng)
+        self.cut_at = cut_at                  # the minigame ends this long after it started, whatever is going on
         self.keys = (keys or "asd").lower()
         self.r = 0.0323 * h
         self.cy = 0.811 * h
@@ -324,13 +342,15 @@ class Strings(LaneGame):
             self.notes = make_notes(self.rng, 3, self.n, t + 2.2, holds=self.holds, chords=self.chords)
         else:
             self.notes = [dict(n, T=n["T"] + t, hit=None, up=None) for n in self.notes]
-        self.t_close = self.last_time() + 1.0
+        self.t_close = self.last_time() + 1.0 if self.cut_at is None else t + self.cut_at
         if self.ghost:      # a leftover note that never arrives: it fades out up the lane as the highway closes
             self.notes.append({"lane": int(self.rng.integers(3)), "T": self.t_close + 0.55, "hold": 0.0,
                                "hit": None, "up": None, "ghost": True})
 
+    CLOSE = 0.45           # how long the closing animation takes, s
+
     def end(self):
-        return self.t_close + 0.3
+        return self.t_close + self.CLOSE
 
     def box(self):
         return (self.cxs[0] - 5 * self.r, self.cy - 10.5 * self.r, self.cxs[2] + 5 * self.r, self.cy + 3 * self.r)
@@ -371,7 +391,7 @@ class Strings(LaneGame):
         for n in sorted(self.notes, key=lambda n: -n["T"]):
             lane, T, col = n["lane"], n["T"], self.COLORS[n["lane"]]
             hit = n["hit"] is not None and n["hit"] <= t
-            if (not hit and t > T + self.perfect_at + self.windows[2]) or (n.get("ghost") and t > self.t_close + 0.08):
+            if not hit and not n.get("ghost") and t > T + self.perfect_at + self.windows[2]:
                 continue                                  # missed: it's gone
             if n["hold"] > 0:
                 # the bar: from the head back to where the hold ends
@@ -396,13 +416,18 @@ class Strings(LaneGame):
             d.rounded_rectangle([x - wd / 2, y - ht / 2, x + wd / 2, y + ht / 2], radius=ht / 2, fill=col)
             c = max(1.5, 0.2 * r * k)
             d.ellipse([x - c, y - c, x + c, y + c], fill=(252, 252, 252))
-        if t >= self.t_close:                              # closing: the whole thing shrinks away
-            k = max(0.35, 1 - 0.65 * (t - self.t_close) / 0.3)
+        if t >= self.t_close:
+            # closing, as on recordings: the whole highway (with the notes left
+            # on it) swells by a fifth around a point under the circles for a
+            # good quarter of a second, then collapses
+            f = (t - self.t_close) / self.CLOSE
+            k = 1 + 0.2 * min(1.0, f / 0.62) if f < 0.8 else max(0.3, 1.1 - 0.8 * (f - 0.8) / 0.2)
             W, H = img.size
-            small = img.resize((max(2, int(W * k)), max(2, int(H * k))), Image.BILINEAR)
+            big = img.resize((max(2, int(W * k)), max(2, int(H * k))), Image.BILINEAR)
             x0, y0, x1, y1 = self._box()
+            ax, ay = self.w / 2 - x0, self.cy + 1.8 * r - y0
             img.paste(Image.fromarray(self.bg[y0:y1, x0:x1]))
-            img.paste(small, ((W - small.width) // 2, int((H - small.height) * 0.7)))
+            img.paste(big, (int(round(ax - ax * k)), int(round(ay - ay * k))))
 
 
 # ---------------------------------------------------------------- keys
@@ -412,8 +437,10 @@ class Keys(LaneGame):
     keys = "asdf"
     perfect_at = 0.0
 
-    def __init__(self, w, h, bg, rng, speed=1.0, n=12, holds=0.2, chords=0.1, ghost=True, keys=None, notes=None):
+    def __init__(self, w, h, bg, rng, speed=1.0, n=12, holds=0.2, chords=0.1, ghost=True, keys=None, notes=None,
+                 cut_at=None):
         super().__init__(w, h, bg, rng)
+        self.cut_at = cut_at
         self.keys = (keys or "asdf").lower()
         self.L = h / 3
         self.x0 = (w - self.L) / 2
@@ -434,13 +461,15 @@ class Keys(LaneGame):
             self.notes = make_notes(self.rng, 4, self.n, t + 2.6, holds=self.holds, chords=self.chords)
         else:
             self.notes = [dict(n, T=n["T"] + t, hit=None, up=None) for n in self.notes]
-        self.t_close = self.last_time() + 1.0
+        self.t_close = self.last_time() + 1.0 if self.cut_at is None else t + self.cut_at
         if self.ghost:
             self.notes.append({"lane": int(self.rng.integers(4)), "T": self.t_close + 0.5, "hold": 0.0,
                                "hit": None, "up": None, "ghost": True})
 
+    CLOSE = 0.43           # how long the closing animation takes, s
+
     def end(self):
-        return self.t_close + 0.35
+        return self.t_close + self.CLOSE
 
     def box(self):
         return self.x0 - 0.5 * self.L, self.top - 0.35 * self.L, self.x0 + 1.1 * self.L, self.line_y + 0.2 * self.L
@@ -468,9 +497,6 @@ class Keys(LaneGame):
         lane_w = L / 4
         wT, hT = 0.88 * lane_w, 0.12 * L
         shift = 0.0
-        if t >= self.t_close:                 # closing: the board drags what's left up, then flings it down
-            f = (t - self.t_close) / 0.35
-            shift = -0.5 * L * f if f < 0.6 else (-0.3 + 2.6 * (f - 0.6)) * L
         for i in range(4):
             if self.lit(i, t):
                 d.rounded_rectangle([x0 + i * lane_w + 3, ly + 4, x0 + (i + 1) * lane_w - 3, ly + 0.132 * L], radius=4,
@@ -498,6 +524,19 @@ class Keys(LaneGame):
             d.rounded_rectangle([xc - wT / 2, ya, xc + wT / 2, yb], radius=min(6, (yb - ya) / 2), fill=(240, 242, 248))
             if yb - ya > 8:
                 d.rectangle([xc - wT / 2 + 2, yb - 0.3 * (yb - ya), xc + wT / 2 - 2, yb - 2], fill=(214, 218, 226))
+        if t >= self.t_close:
+            # closing, as on recordings: the whole board (with the tiles left on
+            # it) swells by an eighth around its bottom middle for a quarter of
+            # a second, then collapses. Seen from where the board used to be,
+            # the tiles drift up and then shoot down.
+            f = (t - self.t_close) / self.CLOSE
+            k = 1 + 0.13 * min(1.0, f / 0.55) if f < 0.78 else max(0.3, 1.13 - 0.83 * (f - 0.78) / 0.22)
+            W, H = img.size
+            big = img.resize((max(2, int(W * k)), max(2, int(H * k))), Image.BILINEAR)
+            bx0, by0, bx1, by1 = self._box()
+            ax, ay = self.x0 + L / 2 - bx0, self.line_y + 0.16 * L - by0
+            img.paste(Image.fromarray(self.bg[by0:by1, bx0:bx1]))
+            img.paste(big, (int(round(ax - ax * k)), int(round(ay - ay * k))))
 
 
 # ---------------------------------------------------------- percussion
@@ -755,6 +794,7 @@ class Session:
         self.idle_since = 0.0
         self._q = []
         self._seq = 0
+        self.inputs = []            # (time the game got it, kind, arg)
         self.t = 0.0
         self.t_done = None
         if direct:
@@ -770,6 +810,7 @@ class Session:
 
     def queue(self, t, kind, arg):
         self._seq += 1
+        self.inputs.append((t, kind, arg))
         heapq.heappush(self._q, (t, self._seq, kind, arg))
 
     def current(self):
